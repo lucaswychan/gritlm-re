@@ -320,7 +320,7 @@ def main():
 
     # Training
     logger.info("Starting training")
-    trainer.train()
+    trainer.train(resume_from_checkpoint="/data/wychanbu/re_models/Qwen2.5_7B_gritlm/checkpoint-500")
     
     # The below does not save if state dict type is `SHARDED_STATE_DICT`
     trainer.save_model()

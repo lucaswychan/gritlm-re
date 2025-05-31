@@ -153,12 +153,15 @@ class GradCacheTrainer(Trainer):
 
         # Place checkpoint in final location after all saving is finished.
         # First wait for everyone to finish writing
+        logger.info(f"Waiting for everyone to finish writing")
         self.args.distributed_state.wait_for_everyone()
+        logger.info(f"Everyone finished writing")
         # Then go through the rewriting process starting on process 0
         if staging_output_dir != output_dir:
             with self.args.main_process_first(
                 desc="Renaming model checkpoint folder to true location", local=self.args.save_on_each_node
             ):
+                logger.info(f"Renaming model checkpoint folder to true location")
                 if os.path.exists(staging_output_dir):
                     if torch.distributed.is_initialized():
                         if torch.distributed.get_rank() == 0:
@@ -166,9 +169,12 @@ class GradCacheTrainer(Trainer):
                         torch.distributed.barrier()
                     else:
                         os.rename(staging_output_dir, output_dir)
+        
+        logger.info(f"Saving model")
 
         # Maybe delete some older checkpoints.
         if self.args.should_save:
+            logger.info(f"Rotating checkpoints")
             self._rotate_checkpoints(use_mtime=True, output_dir=run_dir)
 
     def get_loss_no_gas(self, *args, **kwargs):
@@ -368,7 +374,7 @@ class GradCacheTrainer(Trainer):
         logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_train_batch_size:,}")
         logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
         logger.info(f"  Total optimization steps = {max_steps:,}")
-        logger.info(f"  Number of trainable parameters = {get_model_param_count(model, trainable_only=True):,}")
+        logger.info(f"  Number of trainable parameters = {get_model_param_count(model.model, trainable_only=True):,}")
 
         ### MODIFIED START ###
         if not self.no_emb_gas:
