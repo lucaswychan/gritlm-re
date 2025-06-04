@@ -113,19 +113,22 @@ class CustomDataset(torch.utils.data.Dataset):
                 raise ValueError(f"Unexpected type for pos: {type(pos)}")
             passages.append(pos)
 
-            if len(self.ds_embedding[item]['neg']) < self.args.train_group_size - 1:
-                num = math.ceil((self.args.train_group_size - 1) / len(self.ds_embedding[item]['neg']))
-                negs = random.sample(self.ds_embedding[item]['neg'] * num, self.args.train_group_size - 1)
+            if len(self.ds_embedding[item]['neg']) == 0: #@lucaswychan add checking of no negs since I may only use in-batch negs
+                negs = []
             else:
-                negs = random.sample(self.ds_embedding[item]['neg'], self.args.train_group_size - 1)
-            
-            for i, neg in enumerate(negs):
-                if isinstance(neg, str):
-                    negs[i] = neg[:self.max_char_len]
-                elif isinstance(neg, list):
-                    negs[i] = [x[:self.max_char_len] for x in neg]
+                if len(self.ds_embedding[item]['neg']) < self.args.train_group_size - 1:
+                    num = math.ceil((self.args.train_group_size - 1) / len(self.ds_embedding[item]['neg']))
+                    negs = random.sample(self.ds_embedding[item]['neg'] * num, self.args.train_group_size - 1)
                 else:
-                    raise ValueError(f"Unexpected type for neg: {type(neg)}")
+                    negs = random.sample(self.ds_embedding[item]['neg'], self.args.train_group_size - 1)
+                
+                for i, neg in enumerate(negs):
+                    if isinstance(neg, str):
+                        negs[i] = neg[:self.max_char_len]
+                    elif isinstance(neg, list):
+                        negs[i] = [x[:self.max_char_len] for x in neg]
+                    else:
+                        raise ValueError(f"Unexpected type for neg: {type(neg)}")
             passages.extend(negs)
 
         if (self.mode in ["unified", "generative"]) and (self.n_samples % self.take_nth == 0):
@@ -187,22 +190,35 @@ class CustomCollator(DataCollatorWithPadding):
                     if f[0].strip("\t\n :") else self.base_bos + self.embed_bos.lstrip()
                 )) for f in query
             ]
-            d_instruction_lens = [
-                len(self.tokenizer.tokenize(
-                    self.base_bos + self.user_bos + f[0].strip("\t\n :") + self.user_eos + self.embed_bos
-                    if f[0].strip("\t\n :") else self.base_bos + self.embed_bos.lstrip()
-                )) for f in passage
-            ]
-
+            # logger.info(f"q_instruction_lens: {q_instruction_lens}")
+            
             # Strip including `:` which is added in MEDI but no longer needed due to the format with special tokens
             query = [
                 self.base_bos + self.user_bos + f[0].strip("\t\n :") + self.user_eos + self.embed_bos + f[1] + self.embed_eos
                 if f[0].strip("\t\n :") else self.base_bos + self.embed_bos.lstrip() + f[1] + self.embed_eos for f in query
             ]
-            passage = [
-                self.base_bos + self.user_bos + f[0].strip("\t\n :") + self.user_eos + self.embed_bos + f[1] + self.embed_eos
-                if f[0].strip("\t\n :") else self.base_bos + self.embed_bos.lstrip() + f[1] + self.embed_eos for f in passage
-            ]
+
+            #@lucaswychan add checking of passage type, since original approach will assume there is instruction in the passage
+            # if the query has instruction, then the passage will also have instruction
+            # and will not work for the case where there is no instruction in the passage
+            # and in our case we have no instruction in the passage
+            if isinstance(passage[0], (tuple, list)):
+                d_instruction_lens = [
+                    len(self.tokenizer.tokenize(
+                        self.base_bos + self.user_bos + f[0].strip("\t\n :") + self.user_eos + self.embed_bos
+                        if f[0].strip("\t\n :") else self.base_bos + self.embed_bos.lstrip()
+                    )) for f in passage
+                ]
+                
+                passage = [
+                    self.base_bos + self.user_bos + f[0].strip("\t\n :") + self.user_eos + self.embed_bos + f[1] + self.embed_eos
+                    if f[0].strip("\t\n :") else self.base_bos + self.embed_bos.lstrip() + f[1] + self.embed_eos for f in passage
+                ]
+            else:
+                d_instruction_lens = []
+                passage = [self.base_bos + self.embed_bos.lstrip() + f + self.embed_eos for f in passage]
+        
+        # logger.info(f"passage: {passage}")
 
         # If each sample is a tuple it is of format (instruction, text, instruction, text, ...)
         if isinstance(generative[0], (tuple, list)):
@@ -292,6 +308,7 @@ class CustomRandomSampler(torch.utils.data.sampler.RandomSampler):
     data_source: CustomDataset = None
     replacement: bool = False
 
+    @torch.no_grad()
     def __iter__(self) -> Iterator[int]:
         
         if not hasattr(self, "generator") or self.generator is None:
@@ -333,7 +350,7 @@ class CustomRandomSampler(torch.utils.data.sampler.RandomSampler):
             order = torch.randperm(len(incomplete_indices), generator=generator).tolist()
             incomplete_indices = torch.cat([incomplete_indices[i] for i in order])
             # Then split again into groups of four & drop the last one if it is incomplete
-            mixed_batches = list(torch.split(torch.tensor(incomplete_indices), self.total_batch_size))
+            mixed_batches = list(torch.split(incomplete_indices, self.total_batch_size))
             if len(mixed_batches[-1]) < self.total_batch_size:
                 mixed_batches.pop()
             # Merge all batches to look like [...tensor([259, 273, 284, 289]), tensor([262, 280, 295, 258]), ...]
