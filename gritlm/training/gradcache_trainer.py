@@ -1,20 +1,172 @@
+import contextlib
+import copy
+import functools
+import glob
+import importlib.metadata
+import inspect
+import json
 import math
 import os
+import random
+import re
+import shutil
+import sys
+import tempfile
 import time
-from typing import Optional
+import warnings
+from collections.abc import Mapping
+from functools import partial
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Callable, Optional, Union
 
+
+# Integrations must be imported before ML frameworks:
+# isort: off
+from transformers.integrations import (
+    get_reporting_integration_callbacks,
+)
+
+# isort: on
+
+import huggingface_hub.utils as hf_hub_utils
 import numpy as np
-from packaging import version
 import torch
-from torch.utils.data import Dataset, RandomSampler, DataLoader
+import torch.distributed as dist
+from huggingface_hub import ModelCard, create_repo, upload_folder
+from packaging import version
+from torch import nn
+from torch.utils.data import DataLoader, Dataset, IterableDataset, RandomSampler, SequentialSampler
 
-from transformers import Trainer
-from transformers.debug_utils import DebugOption
+from transformers import __version__
+from transformers.configuration_utils import PretrainedConfig
+from transformers.data.data_collator import DataCollator, DataCollatorWithPadding, default_data_collator
+from transformers.debug_utils import DebugOption, DebugUnderflowOverflow
+from transformers.feature_extraction_sequence_utils import SequenceFeatureExtractor
+from transformers.feature_extraction_utils import FeatureExtractionMixin
+from transformers.hyperparameter_search import ALL_HYPERPARAMETER_SEARCH_BACKENDS, default_hp_search_backend
+from transformers.image_processing_utils import BaseImageProcessor
 from transformers.integrations.deepspeed import deepspeed_init, deepspeed_load_checkpoint, is_deepspeed_available
-from transformers.utils import logging, is_accelerate_available, is_sagemaker_mp_enabled, is_torch_tpu_available, is_datasets_available
-from transformers.trainer_callback import TrainerState
-from transformers.trainer_pt_utils import get_model_param_count
-from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR, TrainOutput, has_length, speed_metrics, seed_worker
+from transformers.integrations.tpu import tpu_spmd_dataloader
+from transformers.modelcard import TrainingSummary
+from transformers.modeling_utils import PreTrainedModel, load_sharded_checkpoint, unwrap_model
+from transformers.models.auto.modeling_auto import (
+    MODEL_FOR_CAUSAL_LM_MAPPING_NAMES,
+    MODEL_MAPPING_NAMES,
+)
+from transformers.optimization import Adafactor, get_scheduler
+from transformers.processing_utils import ProcessorMixin
+from transformers.pytorch_utils import (
+    ALL_LAYERNORM_LAYERS,
+    is_torch_greater_or_equal_than_2_3,
+)
+from transformers.tokenization_utils_base import PreTrainedTokenizerBase
+from transformers.trainer_callback import (
+    CallbackHandler,
+    DefaultFlowCallback,
+    ExportableState,
+    PrinterCallback,
+    ProgressCallback,
+    TrainerCallback,
+    TrainerControl,
+    TrainerState,
+)
+from transformers.trainer_pt_utils import (
+    DistributedTensorGatherer,
+    EvalLoopContainer,
+    IterableDatasetShard,
+    LabelSmoother,
+    LayerWiseDummyOptimizer,
+    LengthGroupedSampler,
+    SequentialDistributedSampler,
+    distributed_broadcast_scalars,
+    distributed_concat,
+    find_batch_size,
+    get_model_param_count,
+    get_module_class_from_name,
+    get_parameter_names,
+    nested_concat,
+    nested_detach,
+    nested_numpify,
+    nested_xla_mesh_reduce,
+    reissue_pt_warnings,
+    remove_dummy_checkpoint,
+    set_rng_state_for_device,
+)
+from transformers.trainer_utils import (
+    PREFIX_CHECKPOINT_DIR,
+    BestRun,
+    EvalLoopOutput,
+    EvalPrediction,
+    HPSearchBackend,
+    HubStrategy,
+    PredictionOutput,
+    RemoveColumnsCollator,
+    SaveStrategy,
+    TrainerMemoryTracker,
+    TrainOutput,
+    check_target_module_exists,
+    default_compute_objective,
+    denumpify_detensorize,
+    enable_full_determinism,
+    find_executable_batch_size,
+    get_last_checkpoint,
+    has_length,
+    neftune_post_forward_hook,
+    number_of_arguments,
+    seed_worker,
+    set_seed,
+    speed_metrics,
+)
+from transformers.training_args import OptimizerNames, ParallelMode, TrainingArguments
+from transformers.utils import (
+    ADAPTER_CONFIG_NAME,
+    ADAPTER_SAFE_WEIGHTS_NAME,
+    ADAPTER_WEIGHTS_NAME,
+    CONFIG_NAME,
+    SAFE_WEIGHTS_INDEX_NAME,
+    SAFE_WEIGHTS_NAME,
+    WEIGHTS_INDEX_NAME,
+    WEIGHTS_NAME,
+    XLA_FSDPV2_MIN_VERSION,
+    PushInProgress,
+    PushToHubMixin,
+    can_return_loss,
+    check_torch_load_is_safe,
+    find_labels,
+    is_accelerate_available,
+    is_apex_available,
+    is_apollo_torch_available,
+    is_bitsandbytes_available,
+    is_datasets_available,
+    is_galore_torch_available,
+    is_grokadamw_available,
+    is_in_notebook,
+    is_ipex_available,
+    is_liger_kernel_available,
+    is_lomo_available,
+    is_peft_available,
+    is_safetensors_available,
+    is_sagemaker_dp_enabled,
+    is_sagemaker_mp_enabled,
+    is_schedulefree_available,
+    is_torch_hpu_available,
+    is_torch_mlu_available,
+    is_torch_mps_available,
+    is_torch_musa_available,
+    is_torch_neuroncore_available,
+    is_torch_npu_available,
+    is_torch_xla_available,
+    is_torch_xpu_available,
+    is_torchao_available,
+    logging,
+    strtobool,
+)
+from transformers.utils.deprecation import deprecate_kwarg
+from transformers.utils.import_utils import requires
+from transformers.utils.quantization_config import QuantizationMethod
+
+from transformers.trainer import Trainer
+
 
 from grad_cache import GradCache
 
@@ -54,128 +206,128 @@ FSDP_MODEL_NAME = "pytorch_model_fsdp"
 logger = logging.get_logger(__name__)
 
 class GradCacheTrainer(Trainer):
-    def create_accelerator_and_postprocess(self):
-        from datetime import timedelta
-        from accelerate.utils import InitProcessGroupKwargs
+    # def create_accelerator_and_postprocess(self):
+    #     from datetime import timedelta
+    #     from accelerate.utils import InitProcessGroupKwargs
 
-        # Below requires setting NCCL_ASYNC_ERROR_HANDLING=1
-        kwargs = InitProcessGroupKwargs(timeout=timedelta(seconds=36000)) # 10 hours
-        grad_acc_kwargs = {"num_steps": self.args.gradient_accumulation_steps}
-        grad_acc_kwargs["sync_with_dataloader"] = False
-        gradient_accumulation_plugin = GradientAccumulationPlugin(**grad_acc_kwargs)
+    #     # Below requires setting NCCL_ASYNC_ERROR_HANDLING=1
+    #     kwargs = InitProcessGroupKwargs(timeout=timedelta(seconds=36000)) # 10 hours
+    #     grad_acc_kwargs = {"num_steps": self.args.gradient_accumulation_steps}
+    #     grad_acc_kwargs["sync_with_dataloader"] = False
+    #     gradient_accumulation_plugin = GradientAccumulationPlugin(**grad_acc_kwargs)
 
-        # create accelerator object
-        self.accelerator = Accelerator(
-            dispatch_batches=self.args.dispatch_batches,
-            split_batches=self.args.split_batches,
-            deepspeed_plugin=self.args.deepspeed_plugin,
-            gradient_accumulation_plugin=gradient_accumulation_plugin,
-            kwargs_handlers=[kwargs],
-        )
-        # some Trainer classes need to use `gather` instead of `gather_for_metrics`, thus we store a flag
-        self.gather_function = self.accelerator.gather_for_metrics
+    #     # create accelerator object
+    #     self.accelerator = Accelerator(
+    #         dispatch_batches=self.args.dispatch_batches,
+    #         split_batches=self.args.split_batches,
+    #         deepspeed_plugin=self.args.deepspeed_plugin,
+    #         gradient_accumulation_plugin=gradient_accumulation_plugin,
+    #         kwargs_handlers=[kwargs],
+    #     )
+    #     # some Trainer classes need to use `gather` instead of `gather_for_metrics`, thus we store a flag
+    #     self.gather_function = self.accelerator.gather_for_metrics
 
-        # deepspeed and accelerate flags covering both trainer args and accelerate launcher
-        self.is_deepspeed_enabled = getattr(self.accelerator.state, "deepspeed_plugin", None) is not None
-        self.is_fsdp_enabled = getattr(self.accelerator.state, "fsdp_plugin", None) is not None
+    #     # deepspeed and accelerate flags covering both trainer args and accelerate launcher
+    #     self.is_deepspeed_enabled = getattr(self.accelerator.state, "deepspeed_plugin", None) is not None
+    #     self.is_fsdp_enabled = getattr(self.accelerator.state, "fsdp_plugin", None) is not None
 
-        # post accelerator creation setup
-        if self.is_fsdp_enabled:
-            fsdp_plugin = self.accelerator.state.fsdp_plugin
-            fsdp_plugin.limit_all_gathers = self.args.fsdp_config.get(
-                "limit_all_gathers", fsdp_plugin.limit_all_gathers
-            )
-            if is_accelerate_available("0.23.0"):
-                fsdp_plugin.activation_checkpointing = self.args.fsdp_config.get(
-                    "activation_checkpointing", fsdp_plugin.activation_checkpointing
-                )
-                if fsdp_plugin.activation_checkpointing and self.args.gradient_checkpointing:
-                    raise ValueError(
-                        "The activation_checkpointing in FSDP config and the gradient_checkpointing in training arg "
-                        "can't be set to True simultaneously. Please use FSDP's activation_checkpointing logic "
-                        "when using FSDP."
-                    )
+    #     # post accelerator creation setup
+    #     if self.is_fsdp_enabled:
+    #         fsdp_plugin = self.accelerator.state.fsdp_plugin
+    #         fsdp_plugin.limit_all_gathers = self.args.fsdp_config.get(
+    #             "limit_all_gathers", fsdp_plugin.limit_all_gathers
+    #         )
+    #         if is_accelerate_available("0.23.0"):
+    #             fsdp_plugin.activation_checkpointing = self.args.fsdp_config.get(
+    #                 "activation_checkpointing", fsdp_plugin.activation_checkpointing
+    #             )
+    #             if fsdp_plugin.activation_checkpointing and self.args.gradient_checkpointing:
+    #                 raise ValueError(
+    #                     "The activation_checkpointing in FSDP config and the gradient_checkpointing in training arg "
+    #                     "can't be set to True simultaneously. Please use FSDP's activation_checkpointing logic "
+    #                     "when using FSDP."
+    #                 )
 
-        if self.is_deepspeed_enabled and getattr(self.args, "hf_deepspeed_config", None) is None:
-            self.propagate_args_to_deepspeed()
+    #     if self.is_deepspeed_enabled and getattr(self.args, "hf_deepspeed_config", None) is None:
+    #         self.propagate_args_to_deepspeed()
 
-    def _save_checkpoint(self, model, trial, metrics=None):
-        # In all cases, including ddp/dp/deepspeed, self.model is always a reference to the model we
-        # want to save except FullyShardedDDP.
-        # assert unwrap_model(model) is self.model, "internal model should be a reference to self.model"
+    # def _save_checkpoint(self, model, trial, metrics=None):
+    #     # In all cases, including ddp/dp/deepspeed, self.model is always a reference to the model we
+    #     # want to save except FullyShardedDDP.
+    #     # assert unwrap_model(model) is self.model, "internal model should be a reference to self.model"
 
-        # Save model checkpoint
-        checkpoint_folder = f"{PREFIX_CHECKPOINT_DIR}-{self.state.global_step}"
+    #     # Save model checkpoint
+    #     checkpoint_folder = f"{PREFIX_CHECKPOINT_DIR}-{self.state.global_step}"
 
-        if self.hp_search_backend is None and trial is None:
-            self.store_flos()
+    #     if self.hp_search_backend is None and trial is None:
+    #         self.store_flos()
 
-        run_dir = self._get_output_dir(trial=trial)
-        output_dir = os.path.join(run_dir, checkpoint_folder)
-        if os.path.exists(output_dir) and len(os.listdir(output_dir)) > 0:
-            logger.warning(
-                f"Checkpoint destination directory {output_dir} already exists and is non-empty."
-                "Saving will proceed but saved results may be invalid."
-            )
-            staging_output_dir = output_dir
-        else:
-            staging_output_dir = os.path.join(run_dir, f"tmp-{checkpoint_folder}")
-        self.save_model(staging_output_dir, _internal_call=True)
+    #     run_dir = self._get_output_dir(trial=trial)
+    #     output_dir = os.path.join(run_dir, checkpoint_folder)
+    #     if os.path.exists(output_dir) and len(os.listdir(output_dir)) > 0:
+    #         logger.warning(
+    #             f"Checkpoint destination directory {output_dir} already exists and is non-empty."
+    #             "Saving will proceed but saved results may be invalid."
+    #         )
+    #         staging_output_dir = output_dir
+    #     else:
+    #         staging_output_dir = os.path.join(run_dir, f"tmp-{checkpoint_folder}")
+    #     self.save_model(staging_output_dir, _internal_call=True)
 
-        if not self.args.save_only_model:
-            # Save optimizer and scheduler
-            self._save_optimizer_and_scheduler(staging_output_dir)
-            # Save RNG state
-            self._save_rng_state(staging_output_dir)
+    #     if not self.args.save_only_model:
+    #         # Save optimizer and scheduler
+    #         self._save_optimizer_and_scheduler(staging_output_dir)
+    #         # Save RNG state
+    #         self._save_rng_state(staging_output_dir)
 
-        # Determine the new best metric / best model checkpoint
-        if metrics is not None and self.args.metric_for_best_model is not None:
-            metric_to_check = self.args.metric_for_best_model
-            if not metric_to_check.startswith("eval_"):
-                metric_to_check = f"eval_{metric_to_check}"
-            metric_value = metrics[metric_to_check]
+    #     # Determine the new best metric / best model checkpoint
+    #     if metrics is not None and self.args.metric_for_best_model is not None:
+    #         metric_to_check = self.args.metric_for_best_model
+    #         if not metric_to_check.startswith("eval_"):
+    #             metric_to_check = f"eval_{metric_to_check}"
+    #         metric_value = metrics[metric_to_check]
 
-            operator = np.greater if self.args.greater_is_better else np.less
-            if (
-                self.state.best_metric is None
-                or self.state.best_model_checkpoint is None
-                or operator(metric_value, self.state.best_metric)
-            ):
-                self.state.best_metric = metric_value
-                self.state.best_model_checkpoint = output_dir
+    #         operator = np.greater if self.args.greater_is_better else np.less
+    #         if (
+    #             self.state.best_metric is None
+    #             or self.state.best_model_checkpoint is None
+    #             or operator(metric_value, self.state.best_metric)
+    #         ):
+    #             self.state.best_metric = metric_value
+    #             self.state.best_model_checkpoint = output_dir
 
-        # Save the Trainer state
-        if self.args.should_save:
-            self.state.save_to_json(os.path.join(staging_output_dir, TRAINER_STATE_NAME))
+    #     # Save the Trainer state
+    #     if self.args.should_save:
+    #         self.state.save_to_json(os.path.join(staging_output_dir, TRAINER_STATE_NAME))
 
-        if self.args.push_to_hub:
-            self._push_from_checkpoint(staging_output_dir)
+    #     if self.args.push_to_hub:
+    #         self._push_from_checkpoint(staging_output_dir)
 
-        # Place checkpoint in final location after all saving is finished.
-        # First wait for everyone to finish writing
-        self.args.distributed_state.wait_for_everyone()
+    #     # Place checkpoint in final location after all saving is finished.
+    #     # First wait for everyone to finish writing
+    #     self.args.distributed_state.wait_for_everyone()
 
-        logger.info("Checking if we need to rename model checkpoint folder to true location")
-        # Then go through the rewriting process, only renaming and rotating from main process(es)
-        if self.is_local_process_zero() if self.args.save_on_each_node else self.is_world_process_zero():
-            logger.info("Renaming model checkpoint folder to true location")
-            if staging_output_dir != output_dir:
-                if os.path.exists(staging_output_dir):
-                    os.rename(staging_output_dir, output_dir)
+    #     logger.info("Checking if we need to rename model checkpoint folder to true location")
+    #     # Then go through the rewriting process, only renaming and rotating from main process(es)
+    #     if self.is_local_process_zero() if self.args.save_on_each_node else self.is_world_process_zero():
+    #         logger.info("Renaming model checkpoint folder to true location")
+    #         if staging_output_dir != output_dir:
+    #             if os.path.exists(staging_output_dir):
+    #                 os.rename(staging_output_dir, output_dir)
 
-                    # Ensure rename completed in cases where os.rename is not atomic
-                    # And can only happen on non-windows based systems
-                    if os.name != "nt":
-                        fd = os.open(output_dir, os.O_RDONLY)
-                        os.fsync(fd)
-                        os.close(fd)
+    #                 # Ensure rename completed in cases where os.rename is not atomic
+    #                 # And can only happen on non-windows based systems
+    #                 if os.name != "nt":
+    #                     fd = os.open(output_dir, os.O_RDONLY)
+    #                     os.fsync(fd)
+    #                     os.close(fd)
 
-            # Maybe delete some older checkpoints.
-            if self.args.should_save:
-                logger.info("Rotating checkpoints")
-                self._rotate_checkpoints(use_mtime=True, output_dir=run_dir)
+    #         # Maybe delete some older checkpoints.
+    #         if self.args.should_save:
+    #             logger.info("Rotating checkpoints")
+    #             self._rotate_checkpoints(use_mtime=True, output_dir=run_dir)
 
-        self.args.distributed_state.wait_for_everyone()
+    #     self.args.distributed_state.wait_for_everyone()
 
     def get_loss_no_gas(self, *args, **kwargs):
         model = kwargs.pop("model")
@@ -209,56 +361,50 @@ class GradCacheTrainer(Trainer):
         self.accelerator.free_memory()
         self._train_batch_size = batch_size
         if self.args.auto_find_batch_size:
+            if self.state.train_batch_size != self._train_batch_size:
+                from accelerate.utils import release_memory
+
+                (self.model_wrapped,) = release_memory(self.model_wrapped)
+                self.model_wrapped = self.model
+
+                # Check for DeepSpeed *after* the initial pass and modify the config
+                if self.is_deepspeed_enabled:
+                    # Temporarily unset `self.args.train_batch_size`
+                    original_bs = self.args.per_device_train_batch_size
+                    self.args.per_device_train_batch_size = self._train_batch_size // max(1, self.args.n_gpu)
+                    self.propagate_args_to_deepspeed(True)
+                    self.args.per_device_train_batch_size = original_bs
             self.state.train_batch_size = self._train_batch_size
         logger.debug(f"Currently training with a batch size of: {self._train_batch_size}")
         # Data loader and number of training steps
         train_dataloader = self.get_train_dataloader()
+        if self.is_fsdp_xla_v2_enabled:
+            train_dataloader = tpu_spmd_dataloader(train_dataloader)
 
         # Setting up training control variables:
         # number of training epochs: num_train_epochs
         # number of training steps per epoch: num_update_steps_per_epoch
         # total number of training steps to execute: max_steps
         total_train_batch_size = self._train_batch_size * args.gradient_accumulation_steps * args.world_size
+        (
+            num_train_epochs,
+            num_update_steps_per_epoch,
+            num_examples,
+            num_train_samples,
+            epoch_based,
+            len_dataloader,
+            max_steps,
+        ) = self.set_initial_training_values(args, train_dataloader, total_train_batch_size)
 
-        len_dataloader = None
         num_train_tokens = None
-        if has_length(train_dataloader):
-            len_dataloader = len(train_dataloader)
-            num_update_steps_per_epoch = len_dataloader // args.gradient_accumulation_steps
-            num_update_steps_per_epoch = max(num_update_steps_per_epoch, 1)
-            num_examples = self.num_examples(train_dataloader)
-            if args.max_steps > 0:
-                max_steps = args.max_steps
-                num_train_epochs = args.max_steps // num_update_steps_per_epoch + int(
-                    args.max_steps % num_update_steps_per_epoch > 0
-                )
-                # May be slightly incorrect if the last batch in the training dataloader has a smaller size but it's
-                # the best we can do.
-                num_train_samples = args.max_steps * total_train_batch_size
-                if args.include_tokens_per_second:
-                    num_train_tokens = (
-                        self.num_tokens(train_dataloader, args.max_steps) * args.gradient_accumulation_steps
-                    )
+        if self.args.include_tokens_per_second:
+            num_train_tokens = self.num_tokens(train_dataloader, None if epoch_based else max_steps)
+            # If going by epochs, multiply tokens linearly
+            if len_dataloader is not None and epoch_based:
+                num_train_tokens *= args.num_train_epochs
+            # Otherwise since its steps, we just multiply by grad accum
             else:
-                max_steps = math.ceil(args.num_train_epochs * num_update_steps_per_epoch)
-                num_train_epochs = math.ceil(args.num_train_epochs)
-                num_train_samples = self.num_examples(train_dataloader) * args.num_train_epochs
-                if args.include_tokens_per_second:
-                    num_train_tokens = self.num_tokens(train_dataloader) * args.num_train_epochs
-        elif args.max_steps > 0:  # Rely on max_steps when dataloader does not have a working size
-            max_steps = args.max_steps
-            # Setting a very large number of epochs so we go as many times as necessary over the iterator.
-            num_train_epochs = sys.maxsize
-            num_update_steps_per_epoch = max_steps
-            num_examples = total_train_batch_size * args.max_steps
-            num_train_samples = args.max_steps * total_train_batch_size
-            if args.include_tokens_per_second:
-                num_train_tokens = self.num_tokens(train_dataloader, args.max_steps) * args.gradient_accumulation_steps
-        else:
-            raise ValueError(
-                "args.max_steps must be set to a positive value if dataloader does not have a length, was"
-                f" {args.max_steps}"
-            )
+                num_train_tokens *= args.gradient_accumulation_steps
 
         if DebugOption.UNDERFLOW_OVERFLOW in self.args.debug:
             if self.args.n_gpu > 1:
@@ -273,6 +419,11 @@ class GradCacheTrainer(Trainer):
 
         delay_optimizer_creation = is_sagemaker_mp_enabled() or self.is_fsdp_xla_enabled or self.is_fsdp_enabled
 
+        # Can't delay optimizer creation when using FSDP2: https://github.com/huggingface/accelerate/blob/3f636d626063ffcf9a337c7d3624d61b7d187d59/src/accelerate/accelerator.py#L1404
+        is_fsdp2 = self.is_fsdp_enabled and (getattr(self.accelerator.state.fsdp_plugin, "fsdp_version", 1) == 2)
+        if is_fsdp2:
+            delay_optimizer_creation = False
+
         # We need to reset the scheduler, as its parameters may be different on subsequent calls
         if self._created_lr_scheduler:
             self.lr_scheduler = None
@@ -284,35 +435,20 @@ class GradCacheTrainer(Trainer):
         if not delay_optimizer_creation:
             self.create_optimizer_and_scheduler(num_training_steps=max_steps)
 
-        self.state = TrainerState()
+        self.state = TrainerState(
+            stateful_callbacks=[
+                cb for cb in self.callback_handler.callbacks + [self.control] if isinstance(cb, ExportableState)
+            ]
+        )
         self.state.is_hyper_param_search = trial is not None
         self.state.train_batch_size = self._train_batch_size
 
         # Compute absolute values for logging, eval, and save if given as ratio
-        if args.logging_steps is not None:
-            if args.logging_steps < 1:
-                self.state.logging_steps = math.ceil(max_steps * args.logging_steps)
-            else:
-                self.state.logging_steps = args.logging_steps
-        if args.eval_steps is not None:
-            if args.eval_steps < 1:
-                self.state.eval_steps = math.ceil(max_steps * args.eval_steps)
-            else:
-                self.state.eval_steps = args.eval_steps
-        if args.save_steps is not None:
-            if args.save_steps < 1:
-                self.state.save_steps = math.ceil(max_steps * args.save_steps)
-            else:
-                self.state.save_steps = args.save_steps
+        self.state.compute_steps(args, max_steps)
 
         # Activate gradient checkpointing if needed
         if args.gradient_checkpointing:
-            if args.gradient_checkpointing_kwargs is None:
-                gradient_checkpointing_kwargs = {}
-            else:
-                gradient_checkpointing_kwargs = args.gradient_checkpointing_kwargs
-
-            self.model.gradient_checkpointing_enable(gradient_checkpointing_kwargs=gradient_checkpointing_kwargs)
+            self.model.gradient_checkpointing_enable(gradient_checkpointing_kwargs=args.gradient_checkpointing_kwargs)
 
         model = self._wrap_model(self.model_wrapped)
 
@@ -321,7 +457,17 @@ class GradCacheTrainer(Trainer):
         # FSDP-XLA, SageMaker MP/DP, DataParallel, IPEX
         use_accelerator_prepare = True if model is self.model else False
 
+        if use_accelerator_prepare and self.is_fsdp_enabled:
+            # In case of auto_find_batch_size=True
+            # Remove FSDP wrapping from sub-models.
+            self.model = unwrap_model(self.model, recursive=True)
+
         if delay_optimizer_creation:
+            if use_accelerator_prepare:
+                # configure fsdp plugin for qlora if any
+                self._fsdp_qlora_plugin_updates()
+                if self.accelerator.mixed_precision != "fp8":
+                    self.model = self.accelerator.prepare(self.model)
             self.create_optimizer_and_scheduler(num_training_steps=max_steps)
 
         # prepare using `accelerator` prepare
@@ -337,6 +483,9 @@ class GradCacheTrainer(Trainer):
                 model, self.optimizer, self.lr_scheduler = self.accelerator.prepare(
                     self.model, self.optimizer, self.lr_scheduler
                 )
+        elif self.args.optim in [OptimizerNames.LOMO, OptimizerNames.ADALOMO]:
+            # In this case we are in DDP + LOMO, which should be supported
+            self.optimizer = self.accelerator.prepare(self.optimizer)
 
         if self.is_fsdp_enabled:
             self.model = self.model_wrapped = model
@@ -352,12 +501,15 @@ class GradCacheTrainer(Trainer):
         # ckpt loading
         if resume_from_checkpoint is not None:
             if self.is_deepspeed_enabled:
-                deepspeed_load_checkpoint(self.model_wrapped, resume_from_checkpoint)
+                deepspeed_load_checkpoint(
+                    self.model_wrapped, resume_from_checkpoint, load_module_strict=not _is_peft_model(self.model)
+                )
             elif is_sagemaker_mp_enabled() or self.is_fsdp_enabled:
                 self._load_from_checkpoint(resume_from_checkpoint, self.model_wrapped)
 
         # Check if saved optimizer or scheduler states exist
         self._load_optimizer_and_scheduler(resume_from_checkpoint)
+        self._load_scaler(resume_from_checkpoint)
 
         # important: at this point:
         # self.model         is the Transformers Model
@@ -374,7 +526,7 @@ class GradCacheTrainer(Trainer):
         logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_train_batch_size:,}")
         logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
         logger.info(f"  Total optimization steps = {max_steps:,}")
-        logger.info(f"  Number of trainable parameters = {get_model_param_count(model.model, trainable_only=True):,}")
+        logger.info(f"  Number of trainable parameters = {get_model_param_count(model, trainable_only=True):,}")
 
         ### MODIFIED START ###
         if not self.no_emb_gas:
@@ -484,7 +636,7 @@ class GradCacheTrainer(Trainer):
                     # AT THE VERY END!
                     sampler = sampler if sampler is not None else []
                     _ = list(sampler)
-
+        
         total_batched_samples = 0
         for epoch in range(epochs_trained, num_train_epochs):
             epoch_iterator = train_dataloader
@@ -552,45 +704,12 @@ class GradCacheTrainer(Trainer):
                     model.train()
                     inputs = self._prepare_inputs(inputs)
 
-                    # Do generative first, as emb contains an all-reduce.
-                    # This is slightly faster (181.60s/it vs 201.94s/it)
-                    if self.mode in ["unified", "generative"]:
-                        # Handle grad accumulation if unified
-                        # Sometimes it is not necessary cuz gen bs is much smaller than emb bs
-                        if self.no_gen_gas:
-                            loss_gen = self.get_loss_no_gas(model=model, generative=inputs["generative"])
-                            
-                            #with self.compute_loss_context_manager():
-                            #    loss_gen = model(generative=inputs["generative"]).loss_gen
-                            #if self.args.n_gpu > 1:
-                            #    loss_gen = loss_gen.mean()  # mean() to average on multi-gpu parallel training
-
-                            #if self.use_apex:
-                            #    with amp.scale_loss(loss_gen, self.optimizer) as scaled_loss:
-                            #        scaled_loss.backward()
-                            #else:
-                            #    self.accelerator.backward(loss_gen)
-
-                            #loss_gen = model(generative=inputs["generative"]).loss_gen
-                            #loss_gen.backward()
-                            #loss_gen = loss_gen.detach()
-                        else:
-                            loss_gen = torch.tensor(0.0, device=args.device)
-                            chunks = gc.split_inputs(inputs["generative"], self.gc_chunk_size)
-                            for chunk in chunks:
-                                loss_gen_chunk = model(generative=chunk).loss_gen / len(chunks)
-                                # This is fine as long as no DeepSpeed / Megatron-LM / loss scaling is used
-                                # https://github.com/huggingface/accelerate/blob/00301b27b75951b6105f2d1a1c4e677a57aba0cd/src/accelerate/accelerator.py#L1961
-                                loss_gen_chunk.backward()
-                                loss_gen += loss_gen_chunk.detach()
-
                     if self.mode in ["unified", "embedding"]:
                         # Split up the embedding forward to save memory eq to ~1 batch size
-                        # at the cost of one additional query forward pass
+                        # at the cost of one additional query forward passz
                         if self.split_emb:
                             # Do backprop on passages first as they are more expensive
                             # & we can reuse them this way
-                            # logger.info(f"model dtype: {model.model.dtype}")
                             loss_emb_p, p_reps = self.get_loss_no_gas(
                                 model=model,
                                 query=inputs["query"], 
@@ -615,7 +734,7 @@ class GradCacheTrainer(Trainer):
                         
                         elif self.split_emb_full:
                             with self.compute_loss_context_manager():
-                                out = model(query=inputs["query"], passage=inputs["passage"], q_grad=False, pos_grad=False)
+                                out = model(query=inputs["query"], passage=inputs["passage"], q_grad=False, p_grad=False)
                                 loss, q_reps, p_reps = out.loss, out.q_reps, out.p_reps
                                 p_reps = p_reps.detach()
                                 
@@ -707,34 +826,23 @@ class GradCacheTrainer(Trainer):
 #                    else:
 #                        import pdb; pdb.set_trace()
 
-                    if self.mode == 'unified':
-                        tr_loss_step = loss_emb + loss_gen
-
-                        self.state.loss_emb = getattr(
-                            self.state, "loss_emb", torch.tensor(0.0).to(loss_emb.device)
-                        )
-                        self.state.loss_gen = getattr(
-                            self.state, "loss_gen", torch.tensor(0.0).to(loss_emb.device)
-                        )
-                        self.state.loss_emb += loss_emb
-                        self.state.loss_gen += loss_gen
-
-                    elif self.mode == 'embedding':
+                    if self.mode == 'embedding':
                         tr_loss_step = loss_emb
-
-                    elif self.mode == 'generative':
-                        tr_loss_step = loss_gen
                     ### MODIFIED END ###
 
                 if (
                     args.logging_nan_inf_filter
-                    and not is_torch_tpu_available()
+                    and not is_torch_xla_available()
                     and (torch.isnan(tr_loss_step) or torch.isinf(tr_loss_step))
                 ):
                     # if loss is nan or inf simply add the average of previous logged losses
                     tr_loss += tr_loss / (1 + self.state.global_step - self._globalstep_last_logged)
                 else:
-                    tr_loss += tr_loss_step
+                    if tr_loss.device != tr_loss_step.device:
+                        raise ValueError(
+                            f"Calculated loss must be on the original device: {tr_loss.device} but device in use is {tr_loss_step.device}"
+                        )
+                    tr_loss = tr_loss + tr_loss_step
 
                 self.current_flos += float(self.floating_point_ops(inputs))
 

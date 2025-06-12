@@ -1,4 +1,4 @@
-  3%|██▋                                                                                                       | 19/755 [16:48<10:49:59, 52.99s/it]
+  3%|███▌                                                                                                      | 25/755 [22:13<10:50:45, 53.49s/it]Traceback (most recent call last):
 {'loss': 28.201, 'learning_rate': 4.347826086956522e-07, 'epoch': 0.0}
 {'loss': 28.0051, 'learning_rate': 8.695652173913044e-07, 'epoch': 0.0}
 {'loss': 29.7388, 'learning_rate': 1.3043478260869566e-06, 'epoch': 0.0}
@@ -18,3 +18,60 @@
 {'loss': 29.2022, 'learning_rate': 7.391304347826087e-06, 'epoch': 0.02}
 {'loss': 27.1189, 'learning_rate': 7.82608695652174e-06, 'epoch': 0.02}
 {'loss': 28.104, 'learning_rate': 8.260869565217392e-06, 'epoch': 0.03}
+{'loss': 27.9903, 'learning_rate': 8.695652173913044e-06, 'epoch': 0.03}
+{'loss': 27.2046, 'learning_rate': 9.130434782608697e-06, 'epoch': 0.03}
+{'loss': 28.3104, 'learning_rate': 9.565217391304349e-06, 'epoch': 0.03}
+{'loss': 26.3069, 'learning_rate': 1e-05, 'epoch': 0.03}
+{'loss': 24.9385, 'learning_rate': 1.0434782608695653e-05, 'epoch': 0.03}
+{'loss': 24.4624, 'learning_rate': 1.0869565217391305e-05, 'epoch': 0.03}
+  File "/usr/lib/python3.10/runpy.py", line 196, in _run_module_as_main
+    return _run_code(code, main_globals, None,
+  File "/usr/lib/python3.10/runpy.py", line 86, in _run_code
+    exec(code, run_globals)
+  File "/home/wychanbu/gritlm/gritlm/training/run.py", line 341, in <module>
+    main()
+  File "/home/wychanbu/gritlm/gritlm/training/run.py", line 323, in main
+    trainer.train()
+  File "/home/wychanbu/gritlm/.gritvenv/lib/python3.10/site-packages/transformers/trainer.py", line 1539, in train
+    return inner_training_loop(
+  File "/home/wychanbu/gritlm/gritlm/training/gradcache_trainer.py", line 694, in _inner_training_loop
+    loss_emb = gc(inputs["query"], inputs["passage"], no_sync_except_last=no_sync_except_last)
+  File "/home/wychanbu/gritlm/gritlm/training/GradCache/src/grad_cache/grad_cache.py", line 70, in __call__
+    return self.cache_step(*args, **kwargs)
+  File "/home/wychanbu/gritlm/gritlm/training/GradCache/src/grad_cache/grad_cache.py", line 278, in cache_step
+    self.forward_backward(model, x, model_cache, rnd_states, no_sync_except_last=no_sync_except_last)
+  File "/home/wychanbu/gritlm/gritlm/training/GradCache/src/grad_cache/grad_cache.py", line 242, in forward_backward
+    surrogate.backward()
+  File "/home/wychanbu/gritlm/.gritvenv/lib/python3.10/site-packages/torch/_tensor.py", line 648, in backward
+    torch.autograd.backward(
+  File "/home/wychanbu/gritlm/.gritvenv/lib/python3.10/site-packages/torch/autograd/__init__.py", line 353, in backward
+    _engine_run_backward(
+  File "/home/wychanbu/gritlm/.gritvenv/lib/python3.10/site-packages/torch/autograd/graph.py", line 824, in _engine_run_backward
+    return Variable._execution_engine.run_backward(  # Calls into the C++ engine to run the backward pass
+KeyboardInterrupt
+[rank0]: Traceback (most recent call last):
+[rank0]:   File "/usr/lib/python3.10/runpy.py", line 196, in _run_module_as_main
+[rank0]:     return _run_code(code, main_globals, None,
+[rank0]:   File "/usr/lib/python3.10/runpy.py", line 86, in _run_code
+[rank0]:     exec(code, run_globals)
+[rank0]:   File "/home/wychanbu/gritlm/gritlm/training/run.py", line 341, in <module>
+[rank0]:     main()
+[rank0]:   File "/home/wychanbu/gritlm/gritlm/training/run.py", line 323, in main
+[rank0]:     trainer.train()
+[rank0]:   File "/home/wychanbu/gritlm/.gritvenv/lib/python3.10/site-packages/transformers/trainer.py", line 1539, in train
+[rank0]:     return inner_training_loop(
+[rank0]:   File "/home/wychanbu/gritlm/gritlm/training/gradcache_trainer.py", line 694, in _inner_training_loop
+[rank0]:     loss_emb = gc(inputs["query"], inputs["passage"], no_sync_except_last=no_sync_except_last)
+[rank0]:   File "/home/wychanbu/gritlm/gritlm/training/GradCache/src/grad_cache/grad_cache.py", line 70, in __call__
+[rank0]:     return self.cache_step(*args, **kwargs)
+[rank0]:   File "/home/wychanbu/gritlm/gritlm/training/GradCache/src/grad_cache/grad_cache.py", line 278, in cache_step
+[rank0]:     self.forward_backward(model, x, model_cache, rnd_states, no_sync_except_last=no_sync_except_last)
+[rank0]:   File "/home/wychanbu/gritlm/gritlm/training/GradCache/src/grad_cache/grad_cache.py", line 242, in forward_backward
+[rank0]:     surrogate.backward()
+[rank0]:   File "/home/wychanbu/gritlm/.gritvenv/lib/python3.10/site-packages/torch/_tensor.py", line 648, in backward
+[rank0]:     torch.autograd.backward(
+[rank0]:   File "/home/wychanbu/gritlm/.gritvenv/lib/python3.10/site-packages/torch/autograd/__init__.py", line 353, in backward
+[rank0]:     _engine_run_backward(
+[rank0]:   File "/home/wychanbu/gritlm/.gritvenv/lib/python3.10/site-packages/torch/autograd/graph.py", line 824, in _engine_run_backward
+[rank0]:     return Variable._execution_engine.run_backward(  # Calls into the C++ engine to run the backward pass
+[rank0]: KeyboardInterrupt

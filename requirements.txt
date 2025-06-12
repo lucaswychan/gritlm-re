@@ -21,7 +21,6 @@ fsspec==2025.5.1
 gitdb==4.0.12
 gitpython==3.1.44
 -e file:///home/wychanbu/gritlm/gritlm/training/GradCache
--e file:///home/wychanbu/gritlm
 hf-xet==1.1.2
 hjson==3.1.0
 huggingface-hub==0.32.2

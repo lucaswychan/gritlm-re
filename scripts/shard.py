@@ -1,7 +1,7 @@
 import sys
-from transformers import AutoModelForCausalLM
+from transformers import AutoModelForCausalLM, AutoModel
 
-model = AutoModelForCausalLM.from_pretrained(
+model = AutoModel.from_pretrained(
     sys.argv[1],
     torch_dtype="auto",
 )

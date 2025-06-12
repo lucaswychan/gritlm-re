@@ -213,7 +213,7 @@ def main():
         projection=model_args.projection,
         attn=model_args.attn,
         attn_implementation=model_args.attn_implementation,
-        torch_dtype=args_to_dtype(training_args),
+        torch_dtype=torch.float32,
         loss_gen_type=training_args.loss_gen_type,
         loss_gen_factor=training_args.loss_gen_factor,
         use_cache=False,
@@ -317,7 +317,7 @@ def main():
         # Set custom sampler, see https://github.com/huggingface/transformers/blob/ccb92be23def445f2afdea94c31286f84b89eb5b/src/transformers/trainer.py#L785
         total_bs = training_args.per_device_train_batch_size * training_args.gradient_accumulation_steps
         total_bs = total_bs * dist.get_world_size() if dist.is_initialized() else total_bs
-        trainer._get_train_sampler = lambda: CustomRandomSampler(
+        trainer._get_train_sampler = lambda train_dataset: CustomRandomSampler(
             total_batch_size=total_bs, ds_lens=ds_embedding_lens,
             _num_samples=sum(ds_embedding_lens), data_source=train_dataset,
         )

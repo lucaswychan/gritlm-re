@@ -42,8 +42,11 @@ class DistributedContrastiveLoss:
         scores = self.compute_similarity(q_reps, p_reps) / self.temperature
         scores = scores.view(q_reps.size(0), -1)
 
-        target = torch.arange(scores.size(0), device=scores.device, dtype=torch.long)
-        target *= (p_reps.size(0) // q_reps.size(0))
+        # FIX: More robust target calculation
+        # Each query should match with its corresponding positive passage
+        # The positive passage for query i is at position i * group_size
+        group_size = p_reps.size(0) // q_reps.size(0)
+        target = torch.arange(q_reps.size(0), device=scores.device, dtype=torch.long) * group_size
         return self.cross_entropy(scores, target)
 
     def _dist_gather_tensor(self, t: Optional[torch.Tensor]):
@@ -153,6 +156,9 @@ class GritLMTrainModel(GritLM):
             attention_mask = features['attention_mask'].clone()
             # Mask out the instruction tokens for pooling
             for i, l in enumerate(instruction_lens):
+                #@lucaswychan add guard for empty instruction
+                if l <= 0:
+                    continue
                 attention_mask[i, :l] = 0
                 # Make sure not all zeros - If this happens it is a bug
                 assert attention_mask[i].sum() > 0, f"All 0: {attention_mask[i]}, l: {l}"

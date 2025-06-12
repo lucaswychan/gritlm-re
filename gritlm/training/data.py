@@ -112,7 +112,7 @@ class CustomDataset(torch.utils.data.Dataset):
             else:
                 raise ValueError(f"Unexpected type for pos: {type(pos)}")
             passages.append(pos)
-
+            
             if len(self.ds_embedding[item]['neg']) == 0: #@lucaswychan add checking of no negs since I may only use in-batch negs
                 negs = []
             else:
@@ -120,6 +120,7 @@ class CustomDataset(torch.utils.data.Dataset):
                     num = math.ceil((self.args.train_group_size - 1) / len(self.ds_embedding[item]['neg']))
                     negs = random.sample(self.ds_embedding[item]['neg'] * num, self.args.train_group_size - 1)
                 else:
+                    
                     negs = random.sample(self.ds_embedding[item]['neg'], self.args.train_group_size - 1)
                 
                 for i, neg in enumerate(negs):
@@ -190,18 +191,13 @@ class CustomCollator(DataCollatorWithPadding):
                     if f[0].strip("\t\n :") else self.base_bos + self.embed_bos.lstrip()
                 )) for f in query
             ]
-            # logger.info(f"q_instruction_lens: {q_instruction_lens}")
             
             # Strip including `:` which is added in MEDI but no longer needed due to the format with special tokens
             query = [
                 self.base_bos + self.user_bos + f[0].strip("\t\n :") + self.user_eos + self.embed_bos + f[1] + self.embed_eos
                 if f[0].strip("\t\n :") else self.base_bos + self.embed_bos.lstrip() + f[1] + self.embed_eos for f in query
             ]
-
-            #@lucaswychan add checking of passage type, since original approach will assume there is instruction in the passage
-            # if the query has instruction, then the passage will also have instruction
-            # and will not work for the case where there is no instruction in the passage
-            # and in our case we have no instruction in the passage
+            
             if isinstance(passage[0], (tuple, list)):
                 d_instruction_lens = [
                     len(self.tokenizer.tokenize(
@@ -209,16 +205,13 @@ class CustomCollator(DataCollatorWithPadding):
                         if f[0].strip("\t\n :") else self.base_bos + self.embed_bos.lstrip()
                     )) for f in passage
                 ]
-                
                 passage = [
                     self.base_bos + self.user_bos + f[0].strip("\t\n :") + self.user_eos + self.embed_bos + f[1] + self.embed_eos
                     if f[0].strip("\t\n :") else self.base_bos + self.embed_bos.lstrip() + f[1] + self.embed_eos for f in passage
                 ]
             else:
-                d_instruction_lens = []
+                d_instruction_lens = [0] * len(passage)
                 passage = [self.base_bos + self.embed_bos.lstrip() + f + self.embed_eos for f in passage]
-        
-        # logger.info(f"passage: {passage}")
 
         # If each sample is a tuple it is of format (instruction, text, instruction, text, ...)
         if isinstance(generative[0], (tuple, list)):
@@ -252,6 +245,7 @@ class CustomCollator(DataCollatorWithPadding):
                 return_tensors="pt",
                 add_special_tokens=False, # BOS / EOS is already in the prompt
             )
+            # print(f"before tokenizer, passage: {passage}")
             features["passage"] = self.tokenizer(
                 passage,
                 padding=True,
@@ -308,7 +302,6 @@ class CustomRandomSampler(torch.utils.data.sampler.RandomSampler):
     data_source: CustomDataset = None
     replacement: bool = False
 
-    @torch.no_grad()
     def __iter__(self) -> Iterator[int]:
         
         if not hasattr(self, "generator") or self.generator is None:

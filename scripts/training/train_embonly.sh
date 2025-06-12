@@ -5,7 +5,7 @@
 #SBATCH --hint=nomultithread         # we get physical cores not logical
 #SBATCH --partition=a3
 #SBATCH --gres=gpu:8                 # number of gpus
-#SBATCH --time 999:00:00             # maximum execution time (HH:MM:SS)
+#SBATCH --time 999:00:00             # maximum executio n time (HH:MM:SS)
 #SBATCH --output=/data/niklas/jobs/%x-%j.out           # output file name
 #SBATCH --exclusive
 
@@ -15,12 +15,11 @@
 cd /home/wychanbu/gritlm/gritlm
 source /home/wychanbu/gritlm/.gritvenv/bin/activate
 # export WANDB_PROJECT="gritlm"
-export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+export CUDA_VISIBLE_DEVICES=0,1,2,3
 export HF_HOME=/data/wychanbu/huggingface
-export NCCL_P2P_DISABLE=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 # Training setup
-GPUS_PER_NODE=8
+GPUS_PER_NODE=4
 
 LAUNCHER="accelerate launch \
     --config_file /home/wychanbu/gritlm/scripts/configs/config_8gpusfsdp_qwen.yml \
@@ -32,11 +31,11 @@ LAUNCHER="accelerate launch \
     --tee 1 \
     "
 
-TRAIN_DATA=/data/wychanbu/re_data/ # replace with the directory of your training data
+TRAIN_DATA=/data/wychanbu/test_data/ # replace with the directory of your training data
 
 export CMD=" \
     -m training.run \
-    --output_dir /data/wychanbu/re_models/Qwen2.5_7B_gritlm_msmarco_nq/ \
+    --output_dir /data/wychanbu/re_models/Qwen2.5-7B_allnli_dureader_fever_hotppotqa_mrtydi_msmarco_nq_quora_squad_t2ranking_triviaqa_hardneg/ \
     --model_name_or_path Qwen/Qwen2.5-7B \
     --train_data $TRAIN_DATA \
     --learning_rate 2e-5 \
@@ -44,12 +43,12 @@ export CMD=" \
     --lr_scheduler_type cosine \
     --warmup_ratio 0.03 \
     --num_train_epochs 1 \
-    --per_device_train_batch_size 8 \
-    --gradient_accumulation_steps 2 \
+    --per_device_train_batch_size 16 \
+    --gradient_accumulation_steps 32 \
     --dataloader_drop_last \
     --normalized \
     --temperature 0.02 \
-    --train_group_size 2 \
+    --train_group_size 4 \
     --negatives_cross_device \
     --query_max_len 512 \
     --passage_max_len 512 \
@@ -61,7 +60,8 @@ export CMD=" \
     --attn bbcc \
     --gradient_checkpointing \
     --attn_implementation sdpa \
-    --save_steps 500 \ 
+    --save_steps 200 \
+    --max_grad_norm 1.0 \
     --lora
     "
 
