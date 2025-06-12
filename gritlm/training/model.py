@@ -148,7 +148,8 @@ class GritLMTrainModel(GritLM):
             out = self.projection(out)
         
         # Mask out the instruction tokens for pooling
-        if instruction_lens is not None:
+        #@lucaswychan add checking of instruction_lens, since original approach will assume there is instruction in the passage
+        if instruction_lens is not None and instruction_lens != []:
             # Make a new copy of attention mask to prevent in-place problems
             attention_mask = features['attention_mask'].clone()
             # Mask out the instruction tokens for pooling

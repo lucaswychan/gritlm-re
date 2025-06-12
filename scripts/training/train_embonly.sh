@@ -15,12 +15,12 @@
 cd /home/wychanbu/gritlm/gritlm
 source /home/wychanbu/gritlm/.gritvenv/bin/activate
 # export WANDB_PROJECT="gritlm"
-export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+export CUDA_VISIBLE_DEVICES=1,2,3,4
 export HF_HOME=/data/wychanbu/huggingface
 export NCCL_P2P_DISABLE=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 # Training setup
-GPUS_PER_NODE=8
+GPUS_PER_NODE=4
 
 LAUNCHER="accelerate launch \
     --config_file /home/wychanbu/gritlm/scripts/configs/config_8gpusfsdp_qwen.yml \
@@ -32,7 +32,7 @@ LAUNCHER="accelerate launch \
     --tee 1 \
     "
 
-TRAIN_DATA=/data/wychanbu/re_data/ # replace with the directory of your training data
+TRAIN_DATA=/data/wychanbu/re_data/hard-neg/ # replace with the directory of your training data
 
 export CMD=" \
     -m training.run \
@@ -40,16 +40,16 @@ export CMD=" \
     --model_name_or_path Qwen/Qwen2.5-7B \
     --train_data $TRAIN_DATA \
     --learning_rate 2e-5 \
-    --weight_decay 0.01 \
+    --weight_decay 0.05 \
     --lr_scheduler_type cosine \
     --warmup_ratio 0.03 \
     --num_train_epochs 1 \
-    --per_device_train_batch_size 8 \
-    --gradient_accumulation_steps 2 \
+    --per_device_train_batch_size 16 \
+    --gradient_accumulation_steps 32 \
     --dataloader_drop_last \
     --normalized \
     --temperature 0.02 \
-    --train_group_size 2 \
+    --train_group_size 4 \
     --negatives_cross_device \
     --query_max_len 512 \
     --passage_max_len 512 \
@@ -61,7 +61,7 @@ export CMD=" \
     --attn bbcc \
     --gradient_checkpointing \
     --attn_implementation sdpa \
-    --save_steps 500 \ 
+    --save_steps 200 \
     --lora
     "
 

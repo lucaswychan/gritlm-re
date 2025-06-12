@@ -182,20 +182,20 @@ class CustomCollator(DataCollatorWithPadding):
         features = {}
 
         # If each sample is a tuple it is of format (instruction, text)
+        #@ lucaswychan remove .strip("\t\n :")
         q_instruction_lens, g_instruction_lens = None, None
         if isinstance(query[0], (tuple, list)):
             q_instruction_lens = [
                 len(self.tokenizer.tokenize(
-                    self.base_bos + self.user_bos + f[0].strip("\t\n :") + self.user_eos + self.embed_bos
-                    if f[0].strip("\t\n :") else self.base_bos + self.embed_bos.lstrip()
+                    self.base_bos + self.user_bos + f[0] + self.user_eos + self.embed_bos
+                    if f[0] else self.base_bos + self.embed_bos.lstrip()
                 )) for f in query
             ]
-            # logger.info(f"q_instruction_lens: {q_instruction_lens}")
             
             # Strip including `:` which is added in MEDI but no longer needed due to the format with special tokens
             query = [
-                self.base_bos + self.user_bos + f[0].strip("\t\n :") + self.user_eos + self.embed_bos + f[1] + self.embed_eos
-                if f[0].strip("\t\n :") else self.base_bos + self.embed_bos.lstrip() + f[1] + self.embed_eos for f in query
+                self.base_bos + self.user_bos + f[0] + self.user_eos + self.embed_bos + f[1] + self.embed_eos
+                if f[0] else self.base_bos + self.embed_bos.lstrip() + f[1] + self.embed_eos for f in query
             ]
 
             #@lucaswychan add checking of passage type, since original approach will assume there is instruction in the passage
@@ -205,14 +205,14 @@ class CustomCollator(DataCollatorWithPadding):
             if isinstance(passage[0], (tuple, list)):
                 d_instruction_lens = [
                     len(self.tokenizer.tokenize(
-                        self.base_bos + self.user_bos + f[0].strip("\t\n :") + self.user_eos + self.embed_bos
-                        if f[0].strip("\t\n :") else self.base_bos + self.embed_bos.lstrip()
+                        self.base_bos + self.user_bos + f[0] + self.user_eos + self.embed_bos
+                        if f[0] else self.base_bos + self.embed_bos.lstrip()
                     )) for f in passage
                 ]
                 
                 passage = [
-                    self.base_bos + self.user_bos + f[0].strip("\t\n :") + self.user_eos + self.embed_bos + f[1] + self.embed_eos
-                    if f[0].strip("\t\n :") else self.base_bos + self.embed_bos.lstrip() + f[1] + self.embed_eos for f in passage
+                    self.base_bos + self.user_bos + f[0] + self.user_eos + self.embed_bos + f[1] + self.embed_eos
+                    if f[0] else self.base_bos + self.embed_bos.lstrip() + f[1] + self.embed_eos for f in passage
                 ]
             else:
                 d_instruction_lens = []
@@ -260,6 +260,7 @@ class CustomCollator(DataCollatorWithPadding):
                 return_tensors="pt",
                 add_special_tokens=False, # BOS / EOS is already in the prompt
             )
+            logger.info(f"features['passage'] shape: {features['passage']['input_ids'].shape}")
 
         if generative[0] is not None:
             features["generative"] = self.tokenizer(

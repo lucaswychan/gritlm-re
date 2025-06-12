@@ -22,3 +22,5 @@ wandb/
 *.pyzw
 *.pyzwz
 *.wandb
+.gritvenv/
+.gritvenv_old/
