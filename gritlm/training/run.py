@@ -35,9 +35,12 @@ def args_to_dtype(args):
     if args.fp16: return torch.float16
     return torch.float32
 
-def filter_too_long_instructions(tokenizer, dataset, query_max_len, passage_max_len):
+#@lucaswychan add checking of no negs since it will affect the true label in cross entropy loss
+def filter_too_long_instructions_and_no_negs(tokenizer, dataset, query_max_len, passage_max_len):
     def filter_fn(example):
         # Filter out super long examples to avoid tokenize taking forever
+        if not example["neg"]:
+            return False
         if (len(example["query"][0]) > query_max_len * 10) or not(example["query"][1]):
             return False
         if len(tokenizer.tokenize(BASE_BOS + USER_BOS + example["query"][0].strip("\t\n :") + USER_EOS + EMBED_BOS)) >= query_max_len:
@@ -166,7 +169,8 @@ def main():
         if training_args.mode in ["embedding", "unified"] and "query" in tmp_ds.features:
             if isinstance(tmp_ds[0]['query'], (tuple, list)):
                 logger.info(f"Filtering out embedding samples with too long instructions for {file}")
-                tmp_ds = filter_too_long_instructions(
+                #@lucaswychan add checking of no negs since it will affect the true label in cross entropy loss
+                tmp_ds = filter_too_long_instructions_and_no_negs(
                     tokenizer,
                     tmp_ds,
                     data_args.query_max_len,
