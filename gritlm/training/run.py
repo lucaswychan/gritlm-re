@@ -41,7 +41,7 @@ def filter_too_long_instructions_and_no_negs(tokenizer, dataset, query_max_len, 
         # Filter out super long examples to avoid tokenize taking forever
         if not example["neg"]:
             return False
-        if (len(example["query"][0]) > query_max_len * 10) or not(example["query"][1]):
+        if (len(example["query"][0]) > query_max_len * 10) or not(example["query"][1].strip()):
             return False
         if len(tokenizer.tokenize(BASE_BOS + USER_BOS + example["query"][0].strip("\t\n :") + USER_EOS + EMBED_BOS)) >= query_max_len:
             return False
@@ -50,11 +50,6 @@ def filter_too_long_instructions_and_no_negs(tokenizer, dataset, query_max_len, 
                 if (len(ex[0]) > passage_max_len * 10) or not ex[1].strip():
                     return False
                 if len(tokenizer.tokenize(BASE_BOS + USER_BOS + ex[0].strip("\t\n :") + USER_EOS + EMBED_BOS)) >= passage_max_len:
-                    return False
-            else:
-                if (len(ex) > passage_max_len * 10) or not ex.strip():
-                    return False
-                if len(tokenizer.tokenize(BASE_BOS + USER_BOS + ex.strip("\t\n :") + USER_EOS + EMBED_BOS)) >= passage_max_len:
                     return False
         return True
     num_proc = max(multiprocessing.cpu_count()-2, 1) if len(dataset) > 5000 else 1
