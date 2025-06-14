@@ -39,15 +39,12 @@ class DistributedContrastiveLoss:
             # It could likely be optimized by only gathering negatives.
             q_reps = self._dist_gather_tensor(q_reps)
             p_reps = self._dist_gather_tensor(p_reps)
-            logger.info(f"q_reps in contrastive loss: {q_reps.shape}")
-            logger.info(f"p_reps in contrastive loss: {p_reps.shape}")
         scores = self.compute_similarity(q_reps, p_reps) / self.temperature
         logger.info(f"scores in contrastive loss: {scores.shape}")
         scores = scores.view(q_reps.size(0), -1)
 
         target = torch.arange(scores.size(0), device=scores.device, dtype=torch.long)
         target *= (p_reps.size(0) // q_reps.size(0))
-        logger.info(f"target scale: {p_reps.size(0) // q_reps.size(0)}")
         return self.cross_entropy(scores, target)
 
     def _dist_gather_tensor(self, t: Optional[torch.Tensor]):

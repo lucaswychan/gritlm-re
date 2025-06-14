@@ -36,7 +36,16 @@ def args_to_dtype(args):
     return torch.float32
 
 #@lucaswychan add checking of no negs since it will affect the true label in cross entropy loss
-def filter_too_long_instructions_and_no_negs(tokenizer, dataset, query_max_len, passage_max_len):
+def filter_too_long_instructions_and_no_negs(dataset, tokenizer, query_max_len, passage_max_len):
+    def tokens_after_instruction(instr: str, text: str) -> int:
+        """How many tokens remain once the instruction part is masked out?"""
+        prompt_full  = BASE_BOS + USER_BOS + instr + USER_EOS + EMBED_BOS + text + EMBED_EOS
+        prompt_instr = BASE_BOS + USER_BOS + instr + USER_EOS + EMBED_BOS
+        tok_full  = tokenizer(prompt_full,  add_special_tokens=False,
+                            truncation=True, max_length=query_max_len)["input_ids"]
+        tok_instr = tokenizer(prompt_instr, add_special_tokens=False)["input_ids"]
+        return len(tok_full) - len(tok_instr)
+
     def filter_fn(example):
         # Filter out super long examples to avoid tokenize taking forever
         if not example["neg"]:
@@ -45,12 +54,8 @@ def filter_too_long_instructions_and_no_negs(tokenizer, dataset, query_max_len, 
             return False
         if len(tokenizer.tokenize(BASE_BOS + USER_BOS + example["query"][0].strip("\t\n :") + USER_EOS + EMBED_BOS)) >= query_max_len:
             return False
-        for ex in example["pos"] + example["neg"]:
-            if isinstance(ex, (tuple, list)):
-                if (len(ex[0]) > passage_max_len * 10) or not ex[1].strip():
-                    return False
-                if len(tokenizer.tokenize(BASE_BOS + USER_BOS + ex[0].strip("\t\n :") + USER_EOS + EMBED_BOS)) >= passage_max_len:
-                    return False
+        if tokens_after_instruction(example["query"][0], example["query"][1]) == 0:
+            return False
         return True
     num_proc = max(multiprocessing.cpu_count()-2, 1) if len(dataset) > 5000 else 1
     return dataset.filter(filter_fn, num_proc=num_proc, load_from_cache_file=True)
@@ -149,6 +154,8 @@ def main():
         data_args.generative_max_len = data_args.passage_max_len
 
     for file in data_files:
+        if not file.endswith(".jsonl"):
+            continue
         logger.info("Loading dataset %s", file)
         tmp_ds = datasets.load_dataset('json', data_files=file, split='train')
         tmp_ds_len = len(tmp_ds)
@@ -166,8 +173,8 @@ def main():
                 logger.info(f"Filtering out embedding samples with too long instructions for {file}")
                 #@lucaswychan add checking of no negs since it will affect the true label in cross entropy loss
                 tmp_ds = filter_too_long_instructions_and_no_negs(
-                    tokenizer,
                     tmp_ds,
+                    tokenizer,
                     data_args.query_max_len,
                     data_args.passage_max_len,
                 )
