@@ -283,7 +283,9 @@ class CustomCollator(DataCollatorWithPadding):
                 assert features["passage"]["input_ids"][i, l] != self.tokenizer.pad_token, f"No text to embed: {passage[i]}"
             # Need to be masked out later
             features["query"]["instruction_lens"] = torch.tensor(q_instruction_lens)
-            features["passage"]["instruction_lens"] = torch.tensor(d_instruction_lens)
+            #@lucaswychan: if there is no instruction in the passage, we don't add instruction_lens
+            if d_instruction_lens:
+                features["passage"]["instruction_lens"] = torch.tensor(d_instruction_lens)
         if g_instruction_lens:
             # Mask instructions as -100 to be ignored in the loss
             # If multiturn, instructions are masked in multiple places
