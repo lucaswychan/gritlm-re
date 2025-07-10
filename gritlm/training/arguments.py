@@ -152,3 +152,6 @@ class CustomTrainingArguments(TrainingArguments):
     split_emb_full: bool = field(default=False, metadata={"help": "Split embedding forward / backward pass"})
     emb_q_only: bool = field(default=False, metadata={"help": "Only backprop on q's"})
     emb_p_only: bool = field(default=False, metadata={"help": "Only backprop on p's (pos & neg)"})
+    
+    debiased: bool = field(default=False, metadata={"help": "Use debiased contrastive loss"})
+    tau_plus: float = field(default=0.1, metadata={"help": "tau+ for debiased contrastive loss"})

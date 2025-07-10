@@ -7,6 +7,8 @@ import torch.distributed as dist
 from torch import Tensor
 from transformers import AutoModel
 from transformers.file_utils import ModelOutput
+import numpy as np
+import torch.nn.functional as F
 
 from gritlm import GritLM
 
@@ -23,27 +25,65 @@ class GritLMTrainOutput(ModelOutput):
 
 
 class DistributedContrastiveLoss:
-    def __init__(self, temperature: float, negatives_cross_device: bool):
-        self.cross_entropy = torch.nn.CrossEntropyLoss(reduction='mean')
+    """Contrastive loss module that supports the standard InfoNCE objective as well as
+    the *debiased* variant presented in *A De-biased Contrastive Loss for
+    Unsupervised Visual Representation Learning* (https://arxiv.org/abs/2010.02855).
+
+    The implementation can optionally gather negatives across devices in a
+    distributed setup so that every mini-batch benefits from a larger negative
+    set without additional memory on a single GPU.
+    """
+
+    def __init__(
+        self,
+        temperature: float,
+        negatives_cross_device: bool,
+        *,
+        debiased: bool = False,
+        tau_plus: float = 0.1,
+        cosine: bool = True,
+    ):
+        # Parameters shared by both loss variants
         self.temperature = temperature
-        self.negatives_cross_device = negatives_cross_device        
+        self.negatives_cross_device = negatives_cross_device
+
+        # Parameters specific to debiased contrastive loss
+        self.debiased = debiased
+        self.tau_plus = tau_plus
+        self.cosine = cosine
+
+        # Components required only for the standard InfoNCE formulation
+        if not self.debiased:
+            self.cross_entropy = torch.nn.CrossEntropyLoss(reduction="mean")
+
+        # Distributed setup
         if self.negatives_cross_device:
             if not dist.is_initialized():
-                raise ValueError('Cannot do negatives_cross_device without distributed training')
+                raise ValueError("Cannot use negatives_cross_device without distributed training")
             self.rank = dist.get_rank()
             self.world_size = dist.get_world_size()
 
     def __call__(self, q_reps, p_reps):
         if self.negatives_cross_device:
-            # This gathers both negatives and positives.
-            # It could likely be optimized by only gathering negatives.
+            # Gather representations from all processes so that we can build a
+            # larger negative set. Both positive and negative samples are
+            # gathered; this could be optimised further but keeps the logic
+            # simple.
             q_reps = self._dist_gather_tensor(q_reps)
             p_reps = self._dist_gather_tensor(p_reps)
+
+        if self.debiased:
+            return self._debiased_contrastive_loss(q_reps, p_reps)
+
+        # ---------- Standard InfoNCE loss ----------
         scores = self.compute_similarity(q_reps, p_reps) / self.temperature
         logger.info(f"scores in contrastive loss: {scores.shape}")
         scores = scores.view(q_reps.size(0), -1)
 
         target = torch.arange(scores.size(0), device=scores.device, dtype=torch.long)
+        # Because queries and passages might have been gathered across devices,
+        # the positive index for a given query is offset by the passage block
+        # size (which equals p_reps.size(0) // q_reps.size(0)).
         target *= (p_reps.size(0) // q_reps.size(0))
         return self.cross_entropy(scores, target)
 
@@ -61,8 +101,80 @@ class DistributedContrastiveLoss:
         return all_tensors
 
     def compute_similarity(self, q_reps, p_reps):
-        if len(p_reps.size()) == 2: return torch.matmul(q_reps, p_reps.transpose(0, 1))
+        if len(p_reps.size()) == 2:
+            return torch.matmul(q_reps, p_reps.transpose(0, 1))
         return torch.matmul(q_reps, p_reps.transpose(-2, -1))
+
+    # ---------------------------------------------------------------------
+    # Helper methods for the debiased contrastive loss
+    # ---------------------------------------------------------------------
+    def _debiased_contrastive_loss(self, q_reps: torch.Tensor, p_reps: torch.Tensor) -> torch.Tensor:
+        """Assumes each query has *M* associated passages (`p_reps`) where the
+        first passage in each consecutive block of size *M* is the positive
+        example and the remaining *M-1* are negatives.
+        """
+
+        B = q_reps.size(0)
+        # Determine group size M (passages per query)
+        assert p_reps.size(0) % B == 0, "p_reps should contain an equal number of passages per query"
+        M = p_reps.size(0) // B
+
+        # Optionally normalise representations (cosine similarity)
+        if self.cosine:
+            q_norm = F.normalize(q_reps, dim=1)
+            p_norm = F.normalize(p_reps, dim=1)
+        else:
+            q_norm = q_reps
+            p_norm = p_reps
+
+        # Similarity matrix between queries and ALL passages  [B, B*M]
+        sim = torch.matmul(q_norm, p_norm.transpose(0, 1)) / self.temperature  # scaled by temperature
+        
+        logger.info(f"sim in debiased contrastive loss: {sim.shape}")
+
+        exp_sim = torch.exp(sim)
+
+        # Positive indices are at i*M for query i
+        pos_indices = (torch.arange(B, device=q_reps.device) * M).view(B, 1)
+        pos = exp_sim.gather(1, pos_indices).squeeze(1)  # [B]
+
+        # All negatives for each query
+        neg = exp_sim.sum(dim=1) - pos  # [B]
+
+        # De-biased estimator Ng
+        if self.debiased:
+            N = M * B - 1  # total negatives per query after concat across processes
+            Ng = (-self.tau_plus * N * pos + neg) / (1.0 - self.tau_plus)
+            Ng = torch.clamp(Ng, min=N * np.exp(-1.0 / self.temperature))
+        else:
+            Ng = neg
+
+        loss = (-torch.log(pos / (pos + Ng))).mean()
+        return loss
+
+    @staticmethod
+    def _get_masks(batch_size: int, device: torch.device):
+        """Return boolean masks for negative and positive pairs.
+
+        For a concatenated batch `[q_1..q_B, p_1..p_B]` of size `2B`, the
+        positive for index *i* is `i+B` (if `i < B`) and `i-B` otherwise. All
+        other indices are treated as negatives, except self-pairs which are
+        excluded.
+        """
+        # Negative mask
+        neg_mask = torch.ones((batch_size, 2 * batch_size), dtype=torch.bool, device=device)
+        for i in range(batch_size):
+            neg_mask[i, i] = False                 # q_i with q_i (self)
+            neg_mask[i, i + batch_size] = False    # q_i with p_i (positive)
+        neg_mask = torch.cat([neg_mask, neg_mask], dim=0)
+
+        # Positive mask
+        pos_mask = torch.zeros((2 * batch_size, 2 * batch_size), dtype=torch.bool, device=device)
+        idx = torch.arange(batch_size, device=device)
+        pos_mask[idx, idx + batch_size] = True
+        pos_mask[idx + batch_size, idx] = True
+
+        return neg_mask, pos_mask
 
 class NextTokenLoss:
     def __init__(self, vocab_size: int, loss_gen_type: str = "mixed", loss_gen_factor: float = 1.0):
@@ -114,12 +226,14 @@ class GritLMTrainModel(GritLM):
         self,
         temperature: float = 1.0,
         negatives_cross_device: bool = False,
+        debiased: bool = False,
+        tau_plus: float = 0.1,
         loss_gen_type: str = "mixed",
         loss_gen_factor: float = None,
         **kwargs,
     ):
         super().__init__(**kwargs, is_inference=False)
-        self.emb_loss_fn = DistributedContrastiveLoss(temperature, negatives_cross_device)
+        self.emb_loss_fn = DistributedContrastiveLoss(temperature, negatives_cross_device, debiased=debiased, tau_plus=tau_plus)
         self.gen_add_kwargs = {"return_dict": True}
         if "mixtral" in kwargs["model_name_or_path"].lower():
             logger.info("Using token loss with routing loss for mixtral")

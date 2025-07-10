@@ -758,6 +758,7 @@ class GradCacheTrainer(Trainer):
                         )
                         self.state.loss_emb += loss_emb
                         self.state.loss_gen += loss_gen
+                    
 
                     elif self.mode == 'embedding':
                         tr_loss_step = loss_emb
