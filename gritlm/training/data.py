@@ -260,7 +260,7 @@ class CustomCollator(DataCollatorWithPadding):
                 return_tensors="pt",
                 add_special_tokens=False, # BOS / EOS is already in the prompt
             )
-            logger.info(f"features['passage'] shape: {features['passage']['input_ids'].shape}")
+            # logger.info(f"features['passage'] shape: {features['passage']['input_ids'].shape}")
 
         if generative[0] is not None:
             features["generative"] = self.tokenizer(
