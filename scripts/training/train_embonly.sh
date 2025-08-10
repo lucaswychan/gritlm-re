@@ -15,12 +15,13 @@
 cd /home/wychanbu/gritlm/gritlm
 source /home/wychanbu/gritlm/.gritvenv/bin/activate
 # export WANDB_PROJECT="gritlm"
-export CUDA_VISIBLE_DEVICES=0,1,3,4
+export CUDA_LAUNCH_BLOCKING=1
+export CUDA_VISIBLE_DEVICES=3,5
 export HF_HOME=/data/wychanbu/huggingface
 export NCCL_P2P_DISABLE=1
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 # Training setup
-GPUS_PER_NODE=4
+GPUS_PER_NODE=2
 
 LAUNCHER="accelerate launch \
     --config_file /home/wychanbu/gritlm/scripts/configs/config_8gpusfsdp_qwen.yml \
@@ -36,15 +37,15 @@ TRAIN_DATA=/data/wychanbu/re_data/hard-neg # replace with the directory of your 
 
 export CMD=" \
     -m training.run \
-    --output_dir /data/wychanbu/re_models/Nemotron-Research-Reasoning-Qwen-1.5B_hard_neg_no_lora/ \
-    --model_name_or_path nvidia/Nemotron-Research-Reasoning-Qwen-1.5B \
+    --output_dir /data/wychanbu/re_models/Qwen3-0.6B_hard_neg_no_lora_cosine_0p1wd/ \
+    --model_name_or_path Qwen/Qwen3-0.6B \
     --train_data $TRAIN_DATA \
     --learning_rate 2e-5 \
-    --weight_decay 0.05 \
+    --weight_decay 0.1 \
     --lr_scheduler_type cosine \
     --warmup_ratio 0.03 \
     --num_train_epochs 1 \
-    --per_device_train_batch_size 256 \
+    --per_device_train_batch_size 512 \
     --gradient_accumulation_steps 2 \
     --dataloader_drop_last \
     --normalized \
@@ -60,7 +61,7 @@ export CMD=" \
     --use_unique_indices \
     --attn bbcc \
     --gradient_checkpointing \
-    --attn_implementation sdpa \
+    --attn_implementation flash_attention_2 \
     --save_steps 200 \
     "
 

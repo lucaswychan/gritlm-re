@@ -1,0 +1,66 @@
+File: allnli-instruction-hard-neg.jsonl
+  Total examples           : 277230
+  Neg < 3                  : 64064  (23.11%)
+  Query text empty         : 0  ( 0.00%)
+  Query lost after truncate: 13  ( 0.00%)
+----------------------------------------------------------------------
+File: dureader-instruction-hard-neg.jsonl
+  Total examples           : 17519
+  Neg < 3                  : 26  ( 0.15%)
+  Query text empty         : 0  ( 0.00%)
+  Query lost after truncate: 0  ( 0.00%)
+----------------------------------------------------------------------
+File: fever-instruction-hard-neg.jsonl
+  Total examples           : 140082
+  Neg < 3                  : 34189  (24.41%)
+  Query text empty         : 0  ( 0.00%)
+  Query lost after truncate: 0  ( 0.00%)
+----------------------------------------------------------------------
+File: hotpotqa-instruction-hard-neg.jsonl
+  Total examples           : 170000
+  Neg < 3                  : 2192  ( 1.29%)
+  Query text empty         : 0  ( 0.00%)
+  Query lost after truncate: 0  ( 0.00%)
+----------------------------------------------------------------------
+File: mrtydi-instruction.jsonl
+  Total examples           : 102824
+  Neg < 3                  : 50  ( 0.05%)
+  Query text empty         : 0  ( 0.00%)
+  Query lost after truncate: 0  ( 0.00%)
+----------------------------------------------------------------------
+File: msmarco-triplets-instruction-hard-neg.jsonl
+  Total examples           : 499184
+  Neg < 3                  : 15217  ( 3.05%)
+  Query text empty         : 0  ( 0.00%)
+  Query lost after truncate: 0  ( 0.00%)
+----------------------------------------------------------------------
+File: nq-train-pairs-instruction-hard-neg.jsonl
+  Total examples           : 100231
+  Neg < 3                  : 2319  ( 2.31%)
+  Query text empty         : 0  ( 0.00%)
+  Query lost after truncate: 0  ( 0.00%)
+----------------------------------------------------------------------
+File: quora_duplicates-instruction-hard-neg.jsonl
+  Total examples           : 103663
+  Neg < 3                  : 9220  ( 8.89%)
+  Query text empty         : 0  ( 0.00%)
+  Query lost after truncate: 0  ( 0.00%)
+----------------------------------------------------------------------
+File: squad-pairs-instruction-hard-neg.jsonl
+  Total examples           : 87599
+  Neg < 3                  : 3105  ( 3.54%)
+  Query text empty         : 0  ( 0.00%)
+  Query lost after truncate: 10  ( 0.01%)
+----------------------------------------------------------------------
+File: t2ranking-instruction-hard-neg.jsonl
+  Total examples           : 90467
+  Neg < 3                  : 3792  ( 4.19%)
+  Query text empty         : 0  ( 0.00%)
+  Query lost after truncate: 0  ( 0.00%)
+----------------------------------------------------------------------
+File: triviaqa-pairs-instruction-hard-neg.jsonl
+  Total examples           : 73346
+  Neg < 3                  : 7881  (10.74%)
+  Query text empty         : 0  ( 0.00%)
+  Query lost after truncate: 0  ( 0.00%)
+----------------------------------------------------------------------

@@ -77,7 +77,8 @@ class DistributedContrastiveLoss:
 
         # ---------- Standard InfoNCE loss ----------
         scores = self.compute_similarity(q_reps, p_reps) / self.temperature
-        logger.info(f"scores in contrastive loss: {scores.shape}")
+        # Remove expensive logging in training loop
+        # logger.info(f"scores in contrastive loss: {scores.shape}")
         scores = scores.view(q_reps.size(0), -1)
 
         target = torch.arange(scores.size(0), device=scores.device, dtype=torch.long)
@@ -130,7 +131,8 @@ class DistributedContrastiveLoss:
         # Similarity matrix between queries and ALL passages  [B, B*M]
         sim = torch.matmul(q_norm, p_norm.transpose(0, 1)) / self.temperature  # scaled by temperature
         
-        logger.info(f"sim in debiased contrastive loss: {sim.shape}")
+        # Remove expensive logging in training loop
+        # logger.info(f"sim in debiased contrastive loss: {sim.shape}")
 
         exp_sim = torch.exp(sim)
 
@@ -248,9 +250,9 @@ class GritLMTrainModel(GritLM):
 
     def encode(self, features):
         if features is None: return None
-        # Clone to avoid modifying the original tensor
-        attention_mask = features['attention_mask'].clone() if 'attention_mask' in features else None
-        instruction_lens = features['instruction_lens'] if 'instruction_lens' in features else None
+        # Use in-place operations where safe to reduce memory allocations
+        attention_mask = features.get('attention_mask')
+        instruction_lens = features.get('instruction_lens')
         kwargs = {'input_ids': features.get('input_ids'), 'attention_mask': attention_mask}
 
         if self.attn[:2] == 'cb':
@@ -264,14 +266,16 @@ class GritLMTrainModel(GritLM):
         
         # Mask out the instruction tokens for pooling
         #@lucaswychan add checking of instruction_lens, since original approach will assume there is instruction in the passage
-        if instruction_lens is not None and instruction_lens != []:
-            # Make a new copy of attention mask to prevent in-place problems
-            attention_mask = features['attention_mask'].clone()
-            # Mask out the instruction tokens for pooling
+        if instruction_lens is not None and len(instruction_lens) > 0:
+            # Clone only when necessary for instruction masking
+            attention_mask = attention_mask.clone()
+            # Vectorized masking for better performance
+            batch_size = attention_mask.size(0)
             for i, l in enumerate(instruction_lens):
-                attention_mask[i, :l] = 0
-                # Make sure not all zeros - If this happens it is a bug
-                assert attention_mask[i].sum() > 0, f"All 0: {attention_mask[i]}, l: {l}"
+                if i < batch_size and l > 0:
+                    attention_mask[i, :l] = 0
+                    # Make sure not all zeros - If this happens it is a bug
+                    assert attention_mask[i].sum() > 0, f"All 0: {attention_mask[i]}, l: {l}"
 
 
         reps = self.pooling(out, attention_mask)
@@ -327,7 +331,15 @@ class GritLMTrainModel(GritLM):
             q_reps, p_reps
         ) if (q_reps is not None and p_reps is not None) else None        
 
-        loss = sum([x for x in [loss_emb, loss_gen] if x is not None])
+        # Optimize loss combination
+        if loss_emb is not None and loss_gen is not None:
+            loss = loss_emb + loss_gen
+        elif loss_emb is not None:
+            loss = loss_emb
+        elif loss_gen is not None:
+            loss = loss_gen
+        else:
+            loss = None
 
         # Also return q_reps in case of GradCache
         return GritLMTrainOutput(

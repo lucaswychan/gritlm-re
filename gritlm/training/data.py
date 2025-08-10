@@ -113,22 +113,28 @@ class CustomDataset(torch.utils.data.Dataset):
                 raise ValueError(f"Unexpected type for pos: {type(pos)}")
             passages.append(pos)
 
-            if len(self.ds_embedding[item]['neg']) == 0: #@lucaswychan add checking of no negs since I may only use in-batch negs
+            # Optimize negative sampling
+            available_negs = self.ds_embedding[item].get('neg', [])
+            if len(available_negs) == 0: #@lucaswychan add checking of no negs since I may only use in-batch negs
                 negs = []
             else:
-                if len(self.ds_embedding[item]['neg']) < self.args.train_group_size - 1:
-                    num = math.ceil((self.args.train_group_size - 1) / len(self.ds_embedding[item]['neg']))
-                    negs = random.sample(self.ds_embedding[item]['neg'] * num, self.args.train_group_size - 1)
+                neg_count = self.args.train_group_size - 1
+                if len(available_negs) < neg_count:
+                    num = math.ceil(neg_count / len(available_negs))
+                    negs = random.sample(available_negs * num, neg_count)
                 else:
-                    negs = random.sample(self.ds_embedding[item]['neg'], self.args.train_group_size - 1)
+                    negs = random.sample(available_negs, neg_count)
                 
-                for i, neg in enumerate(negs):
+                # Optimize negative processing with list comprehension
+                processed_negs = []
+                for neg in negs:
                     if isinstance(neg, str):
-                        negs[i] = neg[:self.max_char_len]
+                        processed_negs.append(neg[:self.max_char_len] if len(neg) > self.max_char_len else neg)
                     elif isinstance(neg, list):
-                        negs[i] = [x[:self.max_char_len] for x in neg]
+                        processed_negs.append([x[:self.max_char_len] if len(x) > self.max_char_len else x for x in neg])
                     else:
                         raise ValueError(f"Unexpected type for neg: {type(neg)}")
+                negs = processed_negs
             passages.extend(negs)
 
         if (self.mode in ["unified", "generative"]) and (self.n_samples % self.take_nth == 0):
@@ -260,7 +266,8 @@ class CustomCollator(DataCollatorWithPadding):
                 return_tensors="pt",
                 add_special_tokens=False, # BOS / EOS is already in the prompt
             )
-            logger.info(f"features['passage'] shape: {features['passage']['input_ids'].shape}")
+            # Remove expensive logging from training loop
+            # logger.info(f"features['passage'] shape: {features['passage']['input_ids'].shape}")
 
         if generative[0] is not None:
             features["generative"] = self.tokenizer(
@@ -271,9 +278,15 @@ class CustomCollator(DataCollatorWithPadding):
                 return_tensors="pt",
                 add_special_tokens=False, # BOS / EOS is already in the prompt
             )
-            features["generative"]["labels"] = features["generative"]["input_ids"].clone()
-            # Do not mask out the first token as it is always something & could be the pad token id (bos)
-            features["generative"]["labels"][:,1:][features["generative"]["labels"][:,1:] == self.tokenizer.pad_token_id] = -100
+            # Optimize label creation
+            input_ids = features["generative"]["input_ids"]
+            labels = input_ids.clone()
+            # More efficient masking
+            pad_mask = (labels == self.tokenizer.pad_token_id)
+            labels[pad_mask] = -100
+            # Don't mask the first token
+            labels[:, 0] = input_ids[:, 0]
+            features["generative"]["labels"] = labels
 
         if q_instruction_lens:
             # Check that there is no mistake

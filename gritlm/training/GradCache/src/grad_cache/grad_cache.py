@@ -240,7 +240,14 @@ class GradCache:
                     y = self.model_call(model, x)
                 reps = self.get_reps(y)
 
+                # logger.info(f"reps.shape in forward_backward: {reps.shape}")
+                # logger.info(f"gradient.shape in forward_backward: {gradient.shape}")
+
                 surrogate = torch.dot(reps.flatten(), gradient.flatten())
+                
+                # logger.info(f"reps.shape in forward_backward after dot product: {reps.shape}")
+                # logger.info(f"gradient.shape in forward_backward after dot product: {gradient.shape}")
+
                 surrogate.backward()
 
     def cache_step(

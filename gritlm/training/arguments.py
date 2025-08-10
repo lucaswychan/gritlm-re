@@ -91,8 +91,16 @@ class DataArguments:
         if not os.path.exists(self.train_data):
             raise FileNotFoundError(f"cannot find file: {self.train_data}, please set a true path")
 
-@dataclass
+@dataclass  
 class CustomTrainingArguments(TrainingArguments):
+    # Enable better defaults for performance
+    def __post_init__(self):
+        super().__post_init__()
+        # Optimize data loading settings
+        if not hasattr(self, 'dataloader_num_workers') or self.dataloader_num_workers == 0:
+            self.dataloader_num_workers = 4
+        if not hasattr(self, 'dataloader_pin_memory'):
+            self.dataloader_pin_memory = True
     negatives_cross_device: bool = field(
         default=False, 
         metadata={
@@ -155,3 +163,10 @@ class CustomTrainingArguments(TrainingArguments):
     
     debiased: bool = field(default=False, metadata={"help": "Use debiased contrastive loss"})
     tau_plus: float = field(default=0.1, metadata={"help": "tau+ for debiased contrastive loss"})
+    
+    use_muon: bool = field(default=False, metadata={"help": "Use muon optimizer"})
+    
+    # Performance optimizations
+    dataloader_num_workers: int = field(default=4, metadata={"help": "Number of workers for data loading"})
+    dataloader_pin_memory: bool = field(default=True, metadata={"help": "Pin memory for faster data transfer"})
+    torch_compile_mode: str = field(default="default", metadata={"help": "torch.compile mode: 'default', 'reduce-overhead', 'max-autotune'"})
