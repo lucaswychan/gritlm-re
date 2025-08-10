@@ -77,7 +77,7 @@ class DistributedContrastiveLoss:
 
         # ---------- Standard InfoNCE loss ----------
         scores = self.compute_similarity(q_reps, p_reps) / self.temperature
-        logger.info(f"scores in contrastive loss: {scores.shape}")
+        # logger.info(f"scores in contrastive loss: {scores.shape}")
         scores = scores.view(q_reps.size(0), -1)
 
         target = torch.arange(scores.size(0), device=scores.device, dtype=torch.long)
@@ -130,7 +130,7 @@ class DistributedContrastiveLoss:
         # Similarity matrix between queries and ALL passages  [B, B*M]
         sim = torch.matmul(q_norm, p_norm.transpose(0, 1)) / self.temperature  # scaled by temperature
         
-        logger.info(f"sim in debiased contrastive loss: {sim.shape}")
+        # logger.info(f"sim in debiased contrastive loss: {sim.shape}")
 
         exp_sim = torch.exp(sim)
 
