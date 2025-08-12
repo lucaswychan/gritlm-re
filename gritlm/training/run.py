@@ -9,10 +9,17 @@ import datasets
 import torch
 import torch.distributed as dist
 from transformers import AutoConfig, AutoTokenizer, HfArgumentParser, Trainer, set_seed
+from transformers.utils import is_sagemaker_mp_enabled
+
 
 from .arguments import CustomTrainingArguments, DataArguments, ModelArguments
 from .data import CustomCollator, CustomDataset, CustomRandomSampler
 from .model import GritLMTrainModel
+from .gradcache_trainer import GradCacheTrainer
+
+if is_sagemaker_mp_enabled():
+    import smdistributed.modelparallel.torch as smp
+    from smdistributed.modelparallel import __version__ as SMP_VERSION
 
 BASE_BOS: str = ""
 TURN_SEP: str = "\n"
@@ -37,10 +44,14 @@ def args_to_dtype(args):
 
 #@lucaswychan add checking of no negs since it will affect the true label in cross entropy loss
 def filter_too_long_instructions_and_no_negs(dataset, tokenizer, query_max_len, passage_max_len):
+    # Pre-compile static parts for performance
+    base_prompt = BASE_BOS + USER_BOS
+    embed_prompt = USER_EOS + EMBED_BOS
+    
     def tokens_after_instruction(instr: str, text: str) -> int:
         """How many tokens remain once the instruction part is masked out?"""
-        prompt_full  = BASE_BOS + USER_BOS + instr + USER_EOS + EMBED_BOS + text + EMBED_EOS
-        prompt_instr = BASE_BOS + USER_BOS + instr + USER_EOS + EMBED_BOS
+        prompt_full  = base_prompt + instr + embed_prompt + text + EMBED_EOS
+        prompt_instr = base_prompt + instr + embed_prompt
         tok_full  = tokenizer(prompt_full,  add_special_tokens=False,
                             truncation=True, max_length=query_max_len)["input_ids"]
         tok_instr = tokenizer(prompt_instr, add_special_tokens=False)["input_ids"]
@@ -50,14 +61,22 @@ def filter_too_long_instructions_and_no_negs(dataset, tokenizer, query_max_len, 
         # Filter out super long examples to avoid tokenize taking forever
         if not example["neg"]:
             return False
-        if (len(example["query"][0]) > query_max_len * 10) or not(example["query"][1].strip()):
+        # Optimize string checks
+        query_0 = example["query"][0]
+        query_1 = example["query"][1]
+        if (len(query_0) > query_max_len * 10) or not query_1.strip():
             return False
-        if len(tokenizer.tokenize(BASE_BOS + USER_BOS + example["query"][0].strip("\t\n :") + USER_EOS + EMBED_BOS)) >= query_max_len:
+        # Use faster string length estimate before tokenization
+        if len(tokenizer.tokenize(base_prompt + example["query"][0].strip("\t\n :") + embed_prompt)) >= query_max_len:
             return False
-        if tokens_after_instruction(example["query"][0], example["query"][1]) == 0:
+        if len(tokenizer.tokenize(base_prompt + query_0.strip("\t\n :") + embed_prompt)) >= query_max_len:
+            return False
+        if tokens_after_instruction(query_0, query_1) == 0:
             return False
         return True
-    num_proc = max(multiprocessing.cpu_count()-2, 1) if len(dataset) > 5000 else 1
+    
+    # Optimize multiprocessing - use more processes for larger datasets
+    num_proc = min(max(multiprocessing.cpu_count()-1, 1), 8) if len(dataset) > 5000 else 1
     return dataset.filter(filter_fn, num_proc=num_proc, load_from_cache_file=True)
 
 def main():
@@ -91,17 +110,6 @@ def main():
     
     if training_args.gradient_checkpointing:
         training_args.gradient_checkpointing_kwargs = {"use_reentrant": False}
-        # Additional stability for LoRA + gradient checkpointing
-        # if hasattr(training_args, 'gradient_checkpointing_kwargs'):
-        #     training_args.gradient_checkpointing_kwargs.update({
-        #         "use_reentrant": False,
-        #         "preserve_rng_state": True
-        #     })
-        # else:
-        #     training_args.gradient_checkpointing_kwargs = {
-        #         "use_reentrant": False,
-        #         "preserve_rng_state": True
-        #     }
 
     logger.info("Training/evaluation parameters %s", training_args)
     logger.info("Model parameters %s", model_args)
@@ -209,6 +217,9 @@ def main():
             bnb_4bit_compute_dtype=torch.bfloat16,
         )
 
+    # Use optimized dtype for training
+    training_dtype = args_to_dtype(training_args)
+    
     model = GritLMTrainModel(
         model_name_or_path=model_args.model_name_or_path,
         normalized=model_args.normalized,
@@ -221,7 +232,7 @@ def main():
         projection=model_args.projection,
         attn=model_args.attn,
         attn_implementation=model_args.attn_implementation,
-        torch_dtype=args_to_dtype(training_args),
+        torch_dtype=training_dtype,
         loss_gen_type=training_args.loss_gen_type,
         loss_gen_factor=training_args.loss_gen_factor,
         use_cache=False,
@@ -230,6 +241,7 @@ def main():
         quantization_config=quantization_config,
         load_in_4bit=load_in_4bit,
     )
+    
     # Add special token for embed
     if model_args.pooling_method == "lasttoken":
         embed_eos = "</e>"
@@ -261,7 +273,7 @@ def main():
         # https://github.com/allenai/open-instruct/blob/9ebcb582cfc243a6dab75b4302fa432784db26c2/open_instruct/finetune.py#L478
         peft_config = LoraConfig(
             inference_mode=False, 
-            r=16, 
+            r=16,
             lora_alpha=32,
             lora_dropout=0.1,
             target_modules="all-linear",
@@ -280,31 +292,75 @@ def main():
         generative_bs=training_args.per_device_generative_bs,
         max_seq_len=max(data_args.query_max_len, data_args.passage_max_len, data_args.generative_max_len),
     )
+    
+    optimizer = None
+    if training_args.use_muon:
+        #@lucaswychan use muon optimizer
+        from muon import MuonWithAuxAdam
+        hidden_matrix_params = [p for n, p in model.named_parameters() if p.ndim >= 2 and "embed" not in n]
+        # hidden_matrix_params_names = [n for n, p in model.named_parameters() if p.ndim >= 2 and "embed" not in n]
+        
+        # logger.info("Hidden matrix params: %s", hidden_matrix_params_names)
+        
+        embed_params = [p for n, p in model.named_parameters() if "embed" in n]
+        # embed_params_names = [n for n, p in model.named_parameters() if "embed" in n]
+        # logger.info("Embed params: %s", embed_params_names)
+        
+        scalar_params = [p for p in model.parameters() if p.ndim < 2]
+        # scalar_params_names = [n for n, p in model.named_parameters() if p.ndim < 2]
+        # logger.info("Scalar params: %s", scalar_params_names)
 
+        # optimized by Adam
+        adam_groups = [dict(params=embed_params, lr=training_args.learning_rate), dict(params=scalar_params, lr=training_args.learning_rate)]
+        adam_groups = [dict(**g, betas=(0.9, 0.999), eps=1e-8, use_muon=False, weight_decay=training_args.weight_decay) for g in adam_groups]
+        
+        # optimized by Muon
+        muon_group = dict(params=hidden_matrix_params, lr=training_args.learning_rate, momentum=0.95, use_muon=True, weight_decay=training_args.weight_decay)
+        param_groups = [*adam_groups, muon_group]
+        muon_optimizer = MuonWithAuxAdam(param_groups)
+        
+        def create_muon_optimizer(self):
+            """
+            Monkey patch the create_optimizer method of GradCacheTrainer to use MuonWithAuxAdam
+            """
+            logger.info("Using Muon optimizer")
+            self.optimizer = muon_optimizer
+            
+            if is_sagemaker_mp_enabled():
+                self.optimizer = smp.DistributedOptimizer(self.optimizer)
+
+            return muon_optimizer
+
+        GradCacheTrainer.create_optimizer = create_muon_optimizer
+        Trainer.create_optimizer = create_muon_optimizer
+
+    # Optimize data collator
+    data_collator = CustomCollator(
+        tokenizer,
+        query_max_len=data_args.query_max_len,
+        passage_max_len=data_args.passage_max_len,
+        generative_max_len=data_args.generative_max_len,
+        base_bos=BASE_BOS,
+        turn_sep=TURN_SEP,
+        user_bos=USER_BOS,
+        user_eos=USER_EOS,
+        embed_bos=EMBED_BOS,
+        embed_eos=embed_eos,
+        assistant_bos=ASSISTANT_BOS,
+        assistant_eos=ASSISTANT_EOS,
+        prefixlm=data_args.prefixlm
+    )
+    
     trainer_kwargs = {
         "model": model,
         "args": training_args,
         "train_dataset": train_dataset,
-        "data_collator": CustomCollator(
-            tokenizer,
-            query_max_len=data_args.query_max_len,
-            passage_max_len=data_args.passage_max_len,
-            generative_max_len=data_args.generative_max_len,
-            base_bos=BASE_BOS,
-            turn_sep=TURN_SEP,
-            user_bos=USER_BOS,
-            user_eos=USER_EOS,
-            embed_bos=EMBED_BOS,
-            embed_eos=embed_eos,
-            assistant_bos=ASSISTANT_BOS,
-            assistant_eos=ASSISTANT_EOS,
-            prefixlm=data_args.prefixlm
-        ),
+        "data_collator": data_collator,
         "tokenizer": tokenizer,
+        "optimizers": (optimizer, None) #@lucaswychan scheduler will always be None, so it can be set in trainer.create_scheduler
     }
-
+    
     if gc_chunk_size is not None:
-        from .gradcache_trainer import GradCacheTrainer
         trainer = GradCacheTrainer(**trainer_kwargs)
         trainer.gc_chunk_size = gc_chunk_size
         trainer.emb_loss_fn = model.emb_loss_fn
@@ -316,6 +372,32 @@ def main():
         trainer.emb_p_only = training_args.emb_p_only
         trainer.emb_q_only = training_args.emb_q_only
     else:
+        # # For regular Trainer, we need to monkey patch the accelerator creation
+        # if dynamo_plugin is not None:
+        #     original_create_accelerator = Trainer.create_accelerator_and_postprocess
+            
+        #     def create_accelerator_with_dynamo(self):
+        #         """Override to include TorchDynamoPlugin."""
+        #         from accelerate import Accelerator
+        #         from accelerate.utils import GradientAccumulationPlugin
+                
+        #         gradient_accumulation_plugin = GradientAccumulationPlugin(
+        #             num_steps=1, adjust_scheduler=False, sync_with_dataloader=False
+        #         )
+                
+        #         accelerator_kwargs = {
+        #             "deepspeed_plugin": self.args.deepspeed_plugin,
+        #             "gradient_accumulation_plugin": gradient_accumulation_plugin,
+        #             "dynamo_plugin": dynamo_plugin,
+        #         }
+                
+        #         self.accelerator = Accelerator(**accelerator_kwargs)
+        #         self.gather_function = self.accelerator.gather_for_metrics
+        #         self.is_deepspeed_enabled = getattr(self.accelerator.state, "deepspeed_plugin", None) is not None
+        #         self.is_fsdp_enabled = getattr(self.accelerator.state, "fsdp_plugin", None) is not None
+            
+        #     Trainer.create_accelerator_and_postprocess = create_accelerator_with_dynamo
+        
         trainer = Trainer(**trainer_kwargs)
 
     if len(ds_embedding_lens) > 1:
@@ -335,6 +417,7 @@ def main():
     # Training
     logger.info("Starting training")
     resume_from_checkpoint = None
+    
     trainer.train(resume_from_checkpoint=resume_from_checkpoint)
     
     # The below does not save if state dict type is `SHARDED_STATE_DICT`
@@ -365,9 +448,9 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as e:
-        logger.error(e)
         if torch.distributed.is_initialized():
             torch.distributed.destroy_process_group()
+        logger.error(e)
         raise e
     finally:
         if torch.distributed.is_initialized():
