@@ -242,6 +242,23 @@ def main():
         load_in_4bit=load_in_4bit,
     )
     
+    # add this to make sure the model is in training mode
+    model.model.train()
+    
+    # #@lucaswychan randomly initialized all the parameters in the model with He normal initialization
+    # def init_transformer(m):
+    #     if isinstance(m, torch.nn.Linear):
+    #         torch.nn.init.normal_(m.weight, mean=0.0, std=0.02)
+    #         if m.bias is not None:
+    #             torch.nn.init.zeros_(m.bias)
+    #     elif isinstance(m, torch.nn.Embedding):
+    #         torch.nn.init.normal_(m.weight, mean=0.0, std=0.02)
+    #     elif isinstance(m, torch.nn.LayerNorm):
+    #         torch.nn.init.ones_(m.weight); torch.nn.init.zeros_(m.bias)
+
+    # model.model.apply(init_transformer)
+    # logger.info(f"Randomly initialized all the parameters in the model")
+    
     # Add special token for embed
     if model_args.pooling_method == "lasttoken":
         embed_eos = "</e>"
@@ -295,44 +312,86 @@ def main():
     
     optimizer = None
     if training_args.use_muon:
-        #@lucaswychan use muon optimizer
-        from muon import MuonWithAuxAdam
-        hidden_matrix_params = [p for n, p in model.named_parameters() if p.ndim >= 2 and "embed" not in n]
-        # hidden_matrix_params_names = [n for n, p in model.named_parameters() if p.ndim >= 2 and "embed" not in n]
+        # Build Muon optimizer AFTER wrapping so parameter references are valid with FSDP
+        # from muon import MuonWithAuxAdam, SingleDeviceMuonWithAuxAdam
+        from dion import Dion
         
-        # logger.info("Hidden matrix params: %s", hidden_matrix_params_names)
-        
-        embed_params = [p for n, p in model.named_parameters() if "embed" in n]
-        # embed_params_names = [n for n, p in model.named_parameters() if "embed" in n]
-        # logger.info("Embed params: %s", embed_params_names)
-        
-        scalar_params = [p for p in model.parameters() if p.ndim < 2]
-        # scalar_params_names = [n for n, p in model.named_parameters() if p.ndim < 2]
-        # logger.info("Scalar params: %s", scalar_params_names)
+        logger.info(f"Using Dion optimizer with learning rate {training_args.learning_rate}")
 
-        # optimized by Adam
-        adam_groups = [dict(params=embed_params, lr=training_args.learning_rate), dict(params=scalar_params, lr=training_args.learning_rate)]
-        adam_groups = [dict(**g, betas=(0.9, 0.999), eps=1e-8, use_muon=False, weight_decay=training_args.weight_decay) for g in adam_groups]
-        
-        # optimized by Muon
-        muon_group = dict(params=hidden_matrix_params, lr=training_args.learning_rate, momentum=0.95, use_muon=True, weight_decay=training_args.weight_decay)
-        param_groups = [*adam_groups, muon_group]
-        muon_optimizer = MuonWithAuxAdam(param_groups)
-        
         def create_muon_optimizer(self):
             """
-            Monkey patch the create_optimizer method of GradCacheTrainer to use MuonWithAuxAdam
+            Create MuonWithAuxAdam (or single-device variant) using current model params.
+            Must be called after accelerator.prepare so FSDP-wrapped params are used.
             """
-            logger.info("Using Muon optimizer")
-            self.optimizer = muon_optimizer
+            logger.info("Using Dion optimizer (with FSDP2 meshes if available)")
+
+            # Group parameters from the CURRENT model (may be FSDP-wrapped)
+            hidden_matrix_params = [p for n, p in self.model.named_parameters() if p.ndim >= 2 and "embed" not in n]
+            embed_params = [p for n, p in self.model.named_parameters() if "embed" in n]
+            scalar_params = [p for p in self.model.parameters() if p.ndim < 2]
+
+            # optimized by Adam
+            adam_groups = [
+                dict(params=embed_params, lr=training_args.learning_rate),
+                dict(params=scalar_params, lr=training_args.learning_rate),
+            ]
+            adam_groups = [
+                dict(**g, betas=(0.9, 0.999), eps=1e-8, algorithm="adamw", weight_decay=training_args.weight_decay)
+                for g in adam_groups
+            ]
             
+            # optimized by Dion for matrix params
+            muon_group = dict(
+                params=hidden_matrix_params,
+                weight_decay=training_args.weight_decay,
+                algorithm="dion",
+            )
+            param_groups = [*adam_groups, muon_group]
+
+            # Build DeviceMesh for FSDP2 if possible (prefer plugin mesh)
+            outer_shard_mesh = None
+            try:
+                if getattr(self, "is_fsdp_enabled", False):
+                    fsdp_plugin = getattr(getattr(self, "accelerator", None), "state", None)
+                    fsdp_plugin = getattr(fsdp_plugin, "fsdp_plugin", None)
+                    if fsdp_plugin is not None:
+                        outer_shard_mesh = getattr(fsdp_plugin, "mesh", None) or getattr(fsdp_plugin, "shard_mesh", None)
+                if outer_shard_mesh is None and dist.is_initialized() and dist.get_world_size() > 1:
+                    try:
+                        from torch.distributed._tensor import init_device_mesh
+                    except Exception:
+                        from torch.distributed.device_mesh import init_device_mesh
+                    outer_shard_mesh = init_device_mesh(
+                        device_type="cuda",
+                        mesh_shape=(dist.get_world_size(),),
+                        mesh_dim_names=("fsdp",),
+                    )
+            except Exception as mesh_err:
+                logger.warning(f"Dion DeviceMesh setup failed; running without shard mesh. Error: {mesh_err}")
+
+            # Initialize Dion. We disable replicate_mesh_grad_sync to let FSDP handle gradient sync.
+            opt = Dion(
+                param_groups,
+                lr=training_args.learning_rate,
+                outer_shard_mesh=outer_shard_mesh,
+                replicate_mesh=None,
+                replicate_mesh_grad_sync=False,
+                momentum=0.95,
+                weight_decay=training_args.weight_decay,
+            )
+
+            self.optimizer = opt
+
             if is_sagemaker_mp_enabled():
+                logger.info("Using Sagemaker MP optimizer")
                 self.optimizer = smp.DistributedOptimizer(self.optimizer)
 
-            return muon_optimizer
+            return self.optimizer
 
         GradCacheTrainer.create_optimizer = create_muon_optimizer
         Trainer.create_optimizer = create_muon_optimizer
+    
+    print(f"Finished creating optimizer")
 
     # Optimize data collator
     data_collator = CustomCollator(
@@ -357,7 +416,7 @@ def main():
         "train_dataset": train_dataset,
         "data_collator": data_collator,
         "tokenizer": tokenizer,
-        "optimizers": (optimizer, None) #@lucaswychan scheduler will always be None, so it can be set in trainer.create_scheduler
+        "optimizers": (optimizer, None), #@lucaswychan scheduler will always be None, so it can be set in trainer.create_scheduler
     }
     
     if gc_chunk_size is not None:
@@ -420,6 +479,13 @@ def main():
     
     trainer.train(resume_from_checkpoint=resume_from_checkpoint)
     
+    # Dion requires synchronizing optimizer states across the replicate mesh before checkpointing
+    if training_args.use_muon and getattr(trainer, "optimizer", None) is not None and hasattr(trainer.optimizer, "synchronize_for_checkpoint"):
+        try:
+            trainer.optimizer.synchronize_for_checkpoint()
+        except Exception as e:
+            logger.warning(f"Dion synchronize_for_checkpoint before first save failed: {e}")
+
     # The below does not save if state dict type is `SHARDED_STATE_DICT`
     trainer.save_model()
 
@@ -428,6 +494,12 @@ def main():
         trainer.accelerator.state.fsdp_plugin.set_state_dict_type("FULL_STATE_DICT")
         fsd_path = os.path.join(training_args.output_dir, "full_state_dict")
         os.makedirs(fsd_path, exist_ok=True)
+        # Ensure optimizer states are synchronized again prior to alternate save location
+        if training_args.use_muon and getattr(trainer, "optimizer", None) is not None and hasattr(trainer.optimizer, "synchronize_for_checkpoint"):
+            try:
+                trainer.optimizer.synchronize_for_checkpoint()
+            except Exception as e:
+                logger.warning(f"Dion synchronize_for_checkpoint before FULL_STATE_DICT save failed: {e}")
         trainer.save_model(fsd_path)
 
     # Save tokenizer & config for easy usage afterwards
