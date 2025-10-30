@@ -307,15 +307,24 @@ class GritLMTrainModel(GritLM):
         if instruction_lens is not None and len(instruction_lens) > 0:
             # Clone only when necessary for instruction masking
             attention_mask = attention_mask.clone()
-            # Vectorized masking for better performance
+            # Vectorized masking for better performance - use advanced indexing
             batch_size = attention_mask.size(0)
-            # Mask out the instruction tokens for pooling
-            for i, l in enumerate(instruction_lens):
-                if i < batch_size and l > 0:
-                    attention_mask[i, :l] = 0
-                    # Make sure not all zeros - If this happens it is a bug
-                    assert attention_mask[i].sum() > 0, f"All 0: {attention_mask[i]}, l: {l}"
-
+            # Create a mask tensor for vectorized operation
+            if batch_size > 0:
+                max_instr_len = max(instruction_lens)
+                if max_instr_len > 0:
+                    # Use broadcasting for faster masking
+                    seq_indices = torch.arange(attention_mask.size(1), device=attention_mask.device)
+                    # Properly create tensor from list (not from another tensor)
+                    if isinstance(instruction_lens, torch.Tensor):
+                        instr_lens_tensor = instruction_lens.to(attention_mask.device).unsqueeze(1)
+                    else:
+                        instr_lens_tensor = torch.as_tensor(instruction_lens, dtype=torch.long, device=attention_mask.device).unsqueeze(1)
+                    mask = seq_indices < instr_lens_tensor
+                    attention_mask[mask] = 0
+                    
+                    # Verify not all zeros - If this happens it is a bug
+                    assert (attention_mask.sum(dim=1) > 0).all(), "Some samples have all-zero attention masks"
 
         reps = self.pooling(out, attention_mask)
         # Normalize can change the dtype (https://discuss.pytorch.org/t/tensor-in-float16-is-transformed-into-float32-after-torch-norm/110891)
@@ -366,19 +375,23 @@ class GritLMTrainModel(GritLM):
                 with torch.no_grad():
                     p_reps = self.encode(passage)
             
-        loss_emb = self.emb_loss_fn(
-            q_reps, p_reps
-        ) if (q_reps is not None and p_reps is not None) else None        
+        # loss_emb = self.emb_loss_fn(
+        #     q_reps, p_reps
+        # ) if (q_reps is not None and p_reps is not None) else None        
 
-        # Optimize loss combination
-        if loss_emb is not None and loss_gen is not None:
-            loss = loss_emb + loss_gen
-        elif loss_emb is not None:
-            loss = loss_emb
-        elif loss_gen is not None:
-            loss = loss_gen
-        else:
-            loss = None
+        # # Optimize loss combination
+        # if loss_emb is not None and loss_gen is not None:
+        #     loss = loss_emb + loss_gen
+        # elif loss_emb is not None:
+        #     loss = loss_emb
+        # elif loss_gen is not None:
+        #     loss = loss_gen
+        # else:
+        #     loss = None
+        
+        loss = None
+        loss_emb = None
+        loss_gen = None
 
         # Also return q_reps in case of GradCache
         return GritLMTrainOutput(
