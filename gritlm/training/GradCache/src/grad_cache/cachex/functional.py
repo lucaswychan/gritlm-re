@@ -1,5 +1,5 @@
-from typing import Iterable, Any
 from functools import partial
+from typing import Any, Iterable
 
 import jax
 import jax.numpy as jnp
@@ -12,6 +12,7 @@ Array = Any
 def grad_with_cache(f, **grad_kwargs):
     def cache_f(params, cache, *args, **kwargs):
         return jnp.sum(f(params, *args, **kwargs) * cache)
+
     return jax.grad(cache_f, **grad_kwargs)
 
 
@@ -34,15 +35,15 @@ def chunk_encode(encode_fn):
     def f(**xx):
         _, hh = jax.lax.scan(partial(encode_scan_fn, encode_fn), 0, xx)
         return hh
+
     return f
 
 
 def cache_grad(encode_fn):
     def f(params, grad_accumulator, cached_grad, **xx):
-        grads, _ = jax.lax.scan(
-            partial(cache_grad_scan_fn, encode_fn, params), grad_accumulator, [cached_grad, xx]
-        )
+        grads, _ = jax.lax.scan(partial(cache_grad_scan_fn, encode_fn, params), grad_accumulator, [cached_grad, xx])
         return grads
+
     return f
 
 

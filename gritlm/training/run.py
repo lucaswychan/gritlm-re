@@ -1,22 +1,22 @@
-import logging
 import json
+import logging
 import multiprocessing
 import os
-from pathlib import Path
 import random
 import sys
+from pathlib import Path
 
-import datasets
 import torch
 import torch.distributed as dist
 from transformers import AutoConfig, AutoTokenizer, HfArgumentParser, Trainer, set_seed
 from transformers.utils import is_sagemaker_mp_enabled
 
+import datasets
 
 from .arguments import CustomTrainingArguments, DataArguments, ModelArguments
 from .data import CustomCollator, CustomDataset, CustomRandomSampler
-from .model import GritLMTrainModel
 from .gradcache_trainer import GradCacheTrainer
+from .model import GritLMTrainModel
 from .ring_trainer import RingTrainer
 
 if is_sagemaker_mp_enabled():
@@ -35,20 +35,24 @@ EMBED_EOS: str = ""
 
 logger = logging.getLogger(__name__)
 
+
 def args_to_dtype(args):
-    if args.bf16: return torch.bfloat16
-    if args.fp16: return torch.float16
+    if args.bf16:
+        return torch.bfloat16
+    if args.fp16:
+        return torch.float16
     return torch.float32
 
-#@lucaswychan add checking of no negs since it will affect the true label in cross entropy loss
+
+# @lucaswychan add checking of no negs since it will affect the true label in cross entropy loss
 def filter_too_long_instructions_and_no_negs(dataset, tokenizer, query_max_len, passage_max_len):
     # Pre-compile static parts for performance
     base_prompt = BASE_BOS + USER_BOS
     embed_prompt = USER_EOS + EMBED_BOS
-    
+
     # Use fast tokenizer if available
-    tokenizer.is_fast if hasattr(tokenizer, 'is_fast') else False
-    
+    tokenizer.is_fast if hasattr(tokenizer, "is_fast") else False
+
     def filter_fn(example):
         # Filter out super long examples to avoid tokenize taking forever
         if not example["neg"]:
@@ -56,52 +60,45 @@ def filter_too_long_instructions_and_no_negs(dataset, tokenizer, query_max_len, 
         # Optimize string checks
         query_0 = example["query"][0]
         query_1 = example["query"][1]
-        
+
         # Quick length checks before expensive tokenization
         if (len(query_0) > query_max_len * 10) or not query_1.strip():
             return False
-        
+
         # Single tokenization pass for instruction length check
         prompt_instr = base_prompt + query_0 + embed_prompt
         prompt_full = prompt_instr + query_1 + EMBED_EOS
-        
+
         # Tokenize both at once to avoid redundant encoding
         tok_instr = tokenizer(prompt_instr, add_special_tokens=False)["input_ids"]
         instr_len = len(tok_instr)
-        
+
         # Check if instruction alone is too long
         if instr_len >= query_max_len:
             return False
-        
+
         # Tokenize full prompt with truncation
-        tok_full = tokenizer(prompt_full, add_special_tokens=False,
-                           truncation=True, max_length=query_max_len)["input_ids"]
-        
+        tok_full = tokenizer(prompt_full, add_special_tokens=False, truncation=True, max_length=query_max_len)["input_ids"]
+
         # Check if there's any text content after instruction
         if len(tok_full) - instr_len <= 0:
             return False
-        
+
         return True
-    
+
     # Optimize multiprocessing - use more processes for larger datasets
     # Increase parallelism for better throughput
-    num_proc = min(max(multiprocessing.cpu_count()-1, 1), 16) if len(dataset) > 5000 else 1
+    num_proc = min(max(multiprocessing.cpu_count() - 1, 1), 16) if len(dataset) > 5000 else 1
     logger.info(f"Filtering dataset with {num_proc} processes")
     return dataset.filter(filter_fn, num_proc=num_proc, load_from_cache_file=True)
+
 
 def main():
     parser = HfArgumentParser((ModelArguments, DataArguments, CustomTrainingArguments))
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
 
-    if (
-        os.path.exists(training_args.output_dir)
-        and os.listdir(training_args.output_dir)
-        and training_args.do_train
-        and not training_args.overwrite_output_dir
-    ):
-        raise ValueError(
-            f"Output directory ({training_args.output_dir}) already exists and is not empty. Use --overwrite_output_dir to bypass."
-        )
+    if os.path.exists(training_args.output_dir) and os.listdir(training_args.output_dir) and training_args.do_train and not training_args.overwrite_output_dir:
+        raise ValueError(f"Output directory ({training_args.output_dir}) already exists and is not empty. Use --overwrite_output_dir to bypass.")
 
     # Setup logging
     logging.basicConfig(
@@ -117,20 +114,20 @@ def main():
         bool(training_args.local_rank != -1),
         training_args.bf16,
     )
-    
+
     # Enable TF32 for faster training on Ampere+ GPUs (using new PyTorch 2.9+ API)
     if torch.cuda.is_available():
         try:
             # Try new API first (PyTorch 2.9+)
-            torch.backends.cudnn.conv.fp32_precision = 'tf32'
-            torch.backends.cuda.matmul.fp32_precision = 'tf32'
+            torch.backends.cudnn.conv.fp32_precision = "tf32"
+            torch.backends.cuda.matmul.fp32_precision = "tf32"
             logger.info("TF32 enabled for faster matmul and cuDNN operations (new API)")
         except AttributeError:
             # Fall back to old API for older PyTorch versions
             torch.backends.cuda.matmul.allow_tf32 = True
             torch.backends.cudnn.allow_tf32 = True
             logger.info("TF32 enabled for faster matmul and cuDNN operations (old API)")
-    
+
     if training_args.gradient_checkpointing:
         training_args.gradient_checkpointing_kwargs = {"use_reentrant": False}
 
@@ -145,53 +142,49 @@ def main():
     gc_chunk_size = None
     if (training_args.gradient_accumulation_steps > 1) and (training_args.negatives_cross_device):
         gc_chunk_size = training_args.per_device_train_batch_size
-        training_args.per_device_train_batch_size = \
-            training_args.per_device_train_batch_size * training_args.gradient_accumulation_steps
+        training_args.per_device_train_batch_size = training_args.per_device_train_batch_size * training_args.gradient_accumulation_steps
         training_args.gradient_accumulation_steps = 1
 
         logger.info("Using GradCache with chunk size %d", gc_chunk_size)
 
     tokenizer = AutoTokenizer.from_pretrained(
         model_args.tokenizer_name if model_args.tokenizer_name else model_args.model_name_or_path,
-        padding_side="right", # Has to be right so masking of instruction tokens works correctly
+        padding_side="right",  # Has to be right so masking of instruction tokens works correctly
     )
     config = AutoConfig.from_pretrained(
         model_args.config_name if model_args.config_name else model_args.model_name_or_path,
         num_labels=1,
     )
-    logger.info('Config: %s', config)
-    
-    if not(tokenizer.pad_token) and tokenizer.bos_token:
-        tokenizer.pad_token = tokenizer.bos_token
-        logger.info('Set pad token to bos token: %s', tokenizer.pad_token)   
+    logger.info("Config: %s", config)
 
-    data_files = [os.path.join(data_args.train_data, x) for x in os.listdir(data_args.train_data)] if \
-        os.path.isdir(data_args.train_data) else [data_args.train_data]
+    if not (tokenizer.pad_token) and tokenizer.bos_token:
+        tokenizer.pad_token = tokenizer.bos_token
+        logger.info("Set pad token to bos token: %s", tokenizer.pad_token)
+
+    data_files = [os.path.join(data_args.train_data, x) for x in os.listdir(data_args.train_data)] if os.path.isdir(data_args.train_data) else [data_args.train_data]
     train_ds, ds_embedding_lens = [], []
-    
+
     num_samples = None
     if data_args.num_samples:
         with open(data_args.num_samples, "r") as f:
             num_samples = json.load(f)
-    
+
     ds_name_to_samples = {}
 
     for file in data_files:
         if not file.endswith(".jsonl"):
             continue
         logger.info("Loading dataset %s", file)
-        tmp_ds = datasets.load_dataset('json', data_files=file, split='train')
+        tmp_ds = datasets.load_dataset("json", data_files=file, split="train")
         tmp_ds_len = len(tmp_ds)
         if tmp_ds_len > data_args.max_example_num_per_dataset:
-            tmp_ds = tmp_ds.select(
-                random.sample(list(range(tmp_ds_len)), data_args.max_example_num_per_dataset)
-            )
+            tmp_ds = tmp_ds.select(random.sample(list(range(tmp_ds_len)), data_args.max_example_num_per_dataset))
         # Check if has instructions separated such that they will be masked out later
         # If so filter out samples where the instructions are too long else they will all be 0s
         if "query" in tmp_ds.features:
-            if isinstance(tmp_ds[0]['query'], (tuple, list)):
+            if isinstance(tmp_ds[0]["query"], (tuple, list)):
                 logger.info(f"Filtering out embedding samples with too long instructions for {file}")
-                #@lucaswychan add checking of no negs since it will affect the true label in cross entropy loss
+                # @lucaswychan add checking of no negs since it will affect the true label in cross entropy loss
                 tmp_ds = filter_too_long_instructions_and_no_negs(
                     tmp_ds,
                     tokenizer,
@@ -202,13 +195,13 @@ def main():
                     assert file.split("/")[-1] in num_samples, f'Missing num_samples for {file.split("/")[-1]}'
                     tmp_ds_len = len(tmp_ds)
                     samples = num_samples[file.split("/")[-1]]
-                    if tmp_ds_len > samples:                    
+                    if tmp_ds_len > samples:
                         tmp_ds = tmp_ds.select(random.sample(list(range(tmp_ds_len)), samples))
             ds_name_to_samples[file.split("/")[-1]] = len(tmp_ds)
             train_ds.append(tmp_ds)
             continue
         logger.info("Skipping dataset %s as its type could not be identified", file)
-    
+
     ds_embedding_lens = [len(t) for t in train_ds]
     ds = datasets.concatenate_datasets(train_ds)
     logger.info("Embedding mode: %d samples", len(ds))
@@ -220,6 +213,7 @@ def main():
     quantization_config, load_in_4bit = None, False
     if training_args.qlora:
         from transformers import BitsAndBytesConfig
+
         quantization_config = BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_use_double_quant=True,
@@ -229,7 +223,7 @@ def main():
 
     # Use optimized dtype for training
     training_dtype = args_to_dtype(training_args)
-    
+
     model = GritLMTrainModel(
         model_name_or_path=model_args.model_name_or_path,
         normalized=model_args.normalized,
@@ -248,10 +242,10 @@ def main():
         quantization_config=quantization_config,
         load_in_4bit=load_in_4bit,
     )
-    
+
     # add this to make sure the model is in training mode
     model.model.train()
-    
+
     # torch.compile is completely disabled due to incompatibility with FSDP + GradCache
     # Error: CUDA Graphs from torch.compile conflicts with GradCache tensor operations
     if training_args.torch_compile:
@@ -262,7 +256,7 @@ def main():
             "  For single-GPU training without GradCache, you can enable torch.compile for 20-50% speedup."
         )
         training_args.torch_compile = False
-    
+
     # Add special token for embed
     if model_args.pooling_method == "lasttoken":
         embed_eos = "</e>"
@@ -285,37 +279,30 @@ def main():
     if (training_args.lora) or (training_args.qlora):
         if training_args.qlora:
             from peft import prepare_model_for_kbit_training
-            model.model = prepare_model_for_kbit_training(
-                model.model, use_gradient_checkpointing=training_args.gradient_checkpointing
-            )
 
-        from peft import get_peft_model, LoraConfig, TaskType
+            model.model = prepare_model_for_kbit_training(model.model, use_gradient_checkpointing=training_args.gradient_checkpointing)
+
+        from peft import LoraConfig, TaskType, get_peft_model
+
         # https://github.com/texttron/tevatron/blob/2e5d00ee21d5a7db0bd2ea1463c9150a572106d4/examples/repllama/repllama.py#L81
         # https://github.com/allenai/open-instruct/blob/9ebcb582cfc243a6dab75b4302fa432784db26c2/open_instruct/finetune.py#L478
-        peft_config = LoraConfig(
-            inference_mode=False, 
-            r=16,
-            lora_alpha=32,
-            lora_dropout=0.1,
-            target_modules="all-linear",
-            task_type=TaskType.FEATURE_EXTRACTION
-        )
+        peft_config = LoraConfig(inference_mode=False, r=16, lora_alpha=32, lora_dropout=0.1, target_modules="all-linear", task_type=TaskType.FEATURE_EXTRACTION)
         model.model.enable_input_require_grads()
         model.model = get_peft_model(model.model, peft_config)
         model.model.print_trainable_parameters()
-        
+
     train_dataset = CustomDataset(
         ds,
         args=data_args,
         tokenizer=tokenizer,
         max_seq_len=max(data_args.query_max_len, data_args.passage_max_len),
     )
-    
+
     optimizer = None
-    
+
     # Note: Optimizer creation is handled by the Trainer
     # We only monkey-patch if using custom optimizers
-    
+
     if training_args.use_muon:
         # Build Muon optimizer AFTER wrapping so parameter references are valid with FSDP
         # from muon import MuonWithAuxAdam, SingleDeviceMuonWithAuxAdam
@@ -337,15 +324,15 @@ def main():
             #     from torch.optim import AdamW
             #     opt = AdamW(self.model.parameters(), lr=training_args.learning_rate, weight_decay=training_args.weight_decay)
             #     self.optimizer = opt
-                
+
             #     if is_sagemaker_mp_enabled():
             #         self.optimizer = smp.DistributedOptimizer(self.optimizer)
 
             #     return self.optimizer
-    
+
             embed_params = [p for n, p in self.model.named_parameters() if "embed" in n]
             scalar_params = [p for p in self.model.parameters() if p.ndim < 2]
-            
+
             logger.info(f"Num of hidden matrix params: {len(hidden_matrix_params)}")
             logger.info(f"Num of embed params: {len(embed_params)}")
             logger.info(f"Num of scalar params: {len(scalar_params)}")
@@ -355,10 +342,7 @@ def main():
                 dict(params=embed_params),
                 dict(params=scalar_params),
             ]
-            adam_groups = [
-                dict(**g, betas=(0.9, 0.999), eps=1e-8, algorithm="adamw", weight_decay=training_args.weight_decay)
-                for g in adam_groups
-            ]
+            adam_groups = [dict(**g, betas=(0.9, 0.999), eps=1e-8, algorithm="adamw", weight_decay=training_args.weight_decay) for g in adam_groups]
 
             # optimized by Muon
             muon_group = dict(
@@ -399,7 +383,6 @@ def main():
                 weight_decay=training_args.weight_decay,
             )
 
-
             self.optimizer = opt
 
             if is_sagemaker_mp_enabled():
@@ -409,7 +392,7 @@ def main():
 
         GradCacheTrainer.create_optimizer = create_muon_optimizer
         Trainer.create_optimizer = create_muon_optimizer
-    
+
     print(f"Finished monkey patching optimizer")
     logger.info("Creating data collator...")
 
@@ -424,7 +407,7 @@ def main():
         embed_bos=EMBED_BOS,
         embed_eos=embed_eos,
     )
-    
+
     logger.info("Preparing trainer kwargs...")
     trainer_kwargs = {
         "model": model,
@@ -432,9 +415,9 @@ def main():
         "train_dataset": train_dataset,
         "data_collator": data_collator,
         "tokenizer": tokenizer,
-        "optimizers": (optimizer, None), #@lucaswychan scheduler will always be None, so it can be set in trainer.create_scheduler
+        "optimizers": (optimizer, None),  # @lucaswychan scheduler will always be None, so it can be set in trainer.create_scheduler
     }
-    
+
     # Choose trainer based on configuration
     if training_args.use_ring_loss:
         # Use Ring-based trainer (more efficient, no GradCache needed)
@@ -444,10 +427,7 @@ def main():
         trainer.temperature = training_args.temperature
         trainer.use_inf_loss = training_args.use_inf_loss
         trainer.head_dim = training_args.ring_head_dim
-        logger.info(f"RingTrainer initialized with "
-                   f"temperature={training_args.temperature}, "
-                   f"use_inf_loss={training_args.use_inf_loss}, "
-                   f"head_dim={training_args.ring_head_dim}")
+        logger.info(f"RingTrainer initialized with " f"temperature={training_args.temperature}, " f"use_inf_loss={training_args.use_inf_loss}, " f"head_dim={training_args.ring_head_dim}")
     elif gc_chunk_size is not None:
         # Use GradCache trainer (original implementation)
         logger.info(f"Creating GradCacheTrainer (gc_chunk_size={gc_chunk_size})...")
@@ -486,8 +466,10 @@ def main():
         total_bs = total_bs * dist.get_world_size() if dist.is_initialized() else total_bs
         logger.info(f"Setting up custom sampler with total_bs={total_bs}, world_size={dist.get_world_size() if dist.is_initialized() else 1}")
         trainer._get_train_sampler = lambda _: CustomRandomSampler(
-            total_batch_size=total_bs, ds_lens=ds_embedding_lens,
-            _num_samples=sum(ds_embedding_lens), data_source=train_dataset,
+            total_batch_size=total_bs,
+            ds_lens=ds_embedding_lens,
+            _num_samples=sum(ds_embedding_lens),
+            data_source=train_dataset,
         )
 
     Path(training_args.output_dir).mkdir(parents=True, exist_ok=True)
@@ -495,16 +477,16 @@ def main():
     # Training
     logger.info("Starting training")
     logger.info("About to call trainer.train()...")
-    
+
     # Ensure all processes are synchronized before starting training
     if dist.is_initialized():
         logger.info("Synchronizing processes before training...")
         dist.barrier()
         logger.info("All processes synchronized")
-    
+
     resume_from_checkpoint = None
-    
-    #@lucaswychan temporarily set the proxy to avoid the issue of downloading the model from the internet
+
+    # @lucaswychan temporarily set the proxy to avoid the issue of downloading the model from the internet
     # os.environ["HTTP_PROXY"] = "http://10.3.1.142:3128"
     # os.environ["HTTPS_PROXY"] = "https://10.3.1.142:3128"
     # os.environ["WANDB_INSECURE_DISABLE_SSL"] = "true"
@@ -512,7 +494,7 @@ def main():
     logger.info("Calling trainer.train()...")
     trainer.train(resume_from_checkpoint=resume_from_checkpoint)
     logger.info("Training completed successfully")
-    
+
     # # Dion requires synchronizing optimizer states across the replicate mesh before checkpointing
     # if training_args.use_muon and getattr(trainer, "optimizer", None) is not None and hasattr(trainer.optimizer, "synchronize_for_checkpoint"):
     #     try:
@@ -537,10 +519,10 @@ def main():
         trainer.save_model(fsd_path)
 
     # Save tokenizer & config for easy usage afterwards
-    if trainer.is_world_process_zero(): 
+    if trainer.is_world_process_zero():
         tokenizer.save_pretrained(training_args.output_dir)
         config.to_json_file(training_args.output_dir + "/config.json")
-        
+
         # # Save the train configuration for reproducibility
         # all_configs = {}
         # all_configs["training_args"] = training_args.__dict__

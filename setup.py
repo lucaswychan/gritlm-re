@@ -36,21 +36,22 @@ To create the package for pypi.
 8. Change the version in __init__.py and setup.py to X.X.X+1.dev0 (e.g. VERSION=1.18.3 -> 1.18.4.dev0).
    Then push the change with a message 'set dev version'
 """
+
 from setuptools import find_packages, setup
 
 with open("README.md", mode="r", encoding="utf-8") as readme_file:
     readme = readme_file.read()
 
 setup(
-    name='gritlm',
-    version='1.0.2',
-    description='GritLM',
+    name="gritlm",
+    version="1.0.2",
+    description="GritLM",
     long_description=readme,
     long_description_content_type="text/markdown",
     keywords="text generation, text embeddings, instruction tuning",
     license="Apache",
-    author='Niklas Muennighoff',
-    author_email='n.muennighoff@gmail.com',
+    author="Niklas Muennighoff",
+    author_email="n.muennighoff@gmail.com",
     project_urls={
         "Huggingface Organization": "https://huggingface.co/gritlm",
         "Source Code": "https://github.com/ContextualAI/gritlm",
@@ -58,13 +59,7 @@ setup(
     url="https://github.com/ContextualAI/gritlm",
     packages=find_packages(),
     python_requires=">=3.7.0",
-    install_requires=[
-        'accelerate==0.26.1',
-        'transformers==4.37.2',
-        'datasets==2.16.1',
-        'wandb',
-        'mteb==1.4.0'
-    ],
+    install_requires=["accelerate==0.26.1", "transformers==4.37.2", "datasets==2.16.1", "wandb", "mteb==1.4.0"],
     classifiers=[
         "Development Status :: 4 - Beta",
         "Environment :: Console",
@@ -73,5 +68,5 @@ setup(
         "License :: OSI Approved :: Apache Software License",
         "Operating System :: OS Independent",
         "Programming Language :: Python",
-    ],    
+    ],
 )

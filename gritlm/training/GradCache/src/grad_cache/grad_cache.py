@@ -1,15 +1,14 @@
-from typing import List, Union, Callable, Any
+import logging
+from collections import UserDict
 from contextlib import nullcontext
 from itertools import repeat
-from collections import UserDict
-import logging
+from typing import Any, Callable, List, Union
 
 import torch
-from torch import nn, Tensor
-from torch.cuda.amp import GradScaler
-from torch.amp import autocast
-
 from grad_cache.context_managers import RandContext
+from torch import Tensor, nn
+from torch.amp import autocast
+from torch.cuda.amp import GradScaler
 
 logger = logging.getLogger(__name__)
 
@@ -20,15 +19,16 @@ class GradCache:
     forward & backward gradient computation. Optimizer step is not included. Native torch automatic mixed precision is
     supported. User needs to handle gradient unscaling and scaler update after a gradeitn cache step.
     """
+
     def __init__(
-            self,
-            models: List[nn.Module],
-            chunk_sizes: Union[int, List[int]],
-            loss_fn: Callable[..., Tensor],
-            split_input_fn: Callable[[Any, int], Any] = None,
-            get_rep_fn: Callable[..., Tensor] = None,
-            fp16: bool = False,
-            scaler: GradScaler = None,
+        self,
+        models: List[nn.Module],
+        chunk_sizes: Union[int, List[int]],
+        loss_fn: Callable[..., Tensor],
+        split_input_fn: Callable[[Any, int], Any] = None,
+        get_rep_fn: Callable[..., Tensor] = None,
+        fp16: bool = False,
+        scaler: GradScaler = None,
     ):
         """
         Initialize the Gradient Cache class instance.
@@ -101,7 +101,7 @@ class GradCache:
             return list(zip(args_chunks, kwargs_chunks))
 
         else:
-            raise NotImplementedError(f'Model input split not implemented for type {type(model_input)}')
+            raise NotImplementedError(f"Model input split not implemented for type {type(model_input)}")
 
     def get_input_tensors(self, model_input) -> List[Tensor]:
         """
@@ -121,7 +121,7 @@ class GradCache:
             return sum((self.get_input_tensors(x) for x in model_input.values()), [])
 
         elif self._get_input_tensors_strict:
-            raise NotImplementedError(f'get_input_tensors not implemented for type {type(model_input)}')
+            raise NotImplementedError(f"get_input_tensors not implemented for type {type(model_input)}")
 
         else:
             return []
@@ -169,9 +169,9 @@ class GradCache:
         return loss
 
     def forward_no_grad(
-            self,
-            model: nn.Module,
-            model_inputs,
+        self,
+        model: nn.Module,
+        model_inputs,
     ) -> [Tensor, List[RandContext]]:
         """
         The first forward pass without gradient computation.
@@ -212,14 +212,7 @@ class GradCache:
 
         return cache, loss.detach()
 
-    def forward_backward(
-            self,
-            model: nn.Module,
-            model_inputs,
-            cached_gradients: List[Tensor],
-            random_states: List[RandContext],
-            no_sync_except_last: bool = False
-    ):
+    def forward_backward(self, model: nn.Module, model_inputs, cached_gradients: List[Tensor], random_states: List[RandContext], no_sync_except_last: bool = False):
         """
         Run the second forward and the backward pass to compute gradient for a model.
         :param model: Encoder model.
@@ -243,12 +236,7 @@ class GradCache:
                 surrogate = torch.dot(reps.flatten(), gradient.flatten())
                 surrogate.backward()
 
-    def cache_step(
-            self,
-            *model_inputs,
-            no_sync_except_last: bool = False,
-            **loss_kwargs
-    ) -> Tensor:
+    def cache_step(self, *model_inputs, no_sync_except_last: bool = False, **loss_kwargs) -> Tensor:
         """
         Run a cached step to compute gradient over the inputs.
         :param model_inputs: Input to each encoder model. Should be in similar order as the class's model.
@@ -275,8 +263,7 @@ class GradCache:
         cache, loss = self.build_cache(*all_reps, **loss_kwargs)
         cache = [c.split(chunk_size) for c, chunk_size in zip(cache, self.chunk_sizes)]
 
-        for model, x, model_cache, rnd_states in zip(
-                self.models, model_inputs, cache, all_rnd_states):
+        for model, x, model_cache, rnd_states in zip(self.models, model_inputs, cache, all_rnd_states):
             self.forward_backward(model, x, model_cache, rnd_states, no_sync_except_last=no_sync_except_last)
 
         return loss

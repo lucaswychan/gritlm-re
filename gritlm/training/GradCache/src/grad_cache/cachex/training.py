@@ -3,10 +3,10 @@ from functools import partial
 import jax
 import jax.numpy as jnp
 
-from .functional import chunk_encode, cache_grad, unchunk_args
+from .functional import cache_grad, chunk_encode, unchunk_args
 
 
-def cache_train_step(loss_fn, state, ss, tt, axis='device'):
+def cache_train_step(loss_fn, state, ss, tt, axis="device"):
     def encode_with_params(params, **kwargs):
         return state.apply_fn(params=params, **kwargs)
 
@@ -19,6 +19,7 @@ def cache_train_step(loss_fn, state, ss, tt, axis='device'):
     @unchunk_args(axis=0, argnums=(0, 1))
     def grad_cache_fn(xx, yy):
         return jnp.mean(loss_fn(xx, yy, axis=axis))
+
     loss, (s_grads, t_grads) = jax.value_and_grad(grad_cache_fn, argnums=(0, 1))(s_reps, t_reps)
 
     grads = jax.tree_map(lambda v: jnp.zeros_like(v), state.params)

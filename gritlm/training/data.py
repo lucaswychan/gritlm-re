@@ -1,12 +1,13 @@
-from dataclasses import dataclass
 import logging
 import math
 import random
+from dataclasses import dataclass
 from typing import Iterator, List, Tuple, Union
 
-import datasets
 import torch
 from transformers import BatchEncoding, DataCollatorWithPadding, PreTrainedTokenizer
+
+import datasets
 
 from .arguments import DataArguments
 
@@ -39,43 +40,44 @@ class CustomDataset(torch.utils.data.Dataset):
             query: Query text (str or list)
             passages: List of passage texts [positive, neg1, neg2, ...]
         """
-        query = self.ds_embedding[item]['query']
+        query = self.ds_embedding[item]["query"]
 
         if isinstance(query, str):
-            query = query[:self.max_char_len]
+            query = query[: self.max_char_len]
         elif isinstance(query, list):
-            query = [x[:self.max_char_len] for x in query]
-        
+            query = [x[: self.max_char_len] for x in query]
+
         passages = []
-        pos = random.choice(self.ds_embedding[item]['pos'])
+        pos = random.choice(self.ds_embedding[item]["pos"])
 
         if isinstance(pos, str):
-            pos = pos[:self.max_char_len]
+            pos = pos[: self.max_char_len]
         elif isinstance(pos, list):
-            pos = [x[:self.max_char_len] for x in pos]
+            pos = [x[: self.max_char_len] for x in pos]
         else:
             raise ValueError(f"Unexpected type for pos: {type(pos)}")
         passages.append(pos)
 
-        if len(self.ds_embedding[item]['neg']) == 0: #@lucaswychan add checking of no negs since I may only use in-batch negs
+        if len(self.ds_embedding[item]["neg"]) == 0:  # @lucaswychan add checking of no negs since I may only use in-batch negs
             negs = []
         else:
-            if len(self.ds_embedding[item]['neg']) < self.args.train_group_size - 1:
-                num = math.ceil((self.args.train_group_size - 1) / len(self.ds_embedding[item]['neg']))
-                negs = random.sample(self.ds_embedding[item]['neg'] * num, self.args.train_group_size - 1)
+            if len(self.ds_embedding[item]["neg"]) < self.args.train_group_size - 1:
+                num = math.ceil((self.args.train_group_size - 1) / len(self.ds_embedding[item]["neg"]))
+                negs = random.sample(self.ds_embedding[item]["neg"] * num, self.args.train_group_size - 1)
             else:
-                negs = random.sample(self.ds_embedding[item]['neg'], self.args.train_group_size - 1)
-            
+                negs = random.sample(self.ds_embedding[item]["neg"], self.args.train_group_size - 1)
+
             for i, neg in enumerate(negs):
                 if isinstance(neg, str):
-                    negs[i] = neg[:self.max_char_len]
+                    negs[i] = neg[: self.max_char_len]
                 elif isinstance(neg, list):
-                    negs[i] = [x[:self.max_char_len] for x in neg]
+                    negs[i] = [x[: self.max_char_len] for x in neg]
                 else:
                     raise ValueError(f"Unexpected type for neg: {type(neg)}")
         passages.extend(negs)
 
         return query, passages
+
 
 @dataclass
 class CustomCollator(DataCollatorWithPadding):
@@ -84,6 +86,7 @@ class CustomCollator(DataCollatorWithPadding):
     and pass batch separately to the actual collator.
     Abstract out data detail for the model.
     """
+
     query_max_len: int = 32
     passage_max_len: int = 128
 
@@ -96,7 +99,7 @@ class CustomCollator(DataCollatorWithPadding):
     # Am embed eos is useless as there is no generative loss on it so it won't be learned
     # & it does not add anything new; It only makes sense for lasttoken pooling
     embed_eos: str = ""
-    
+
     def __post_init__(self):
         # Cache for tokenization patterns to avoid repeated string operations
         self._base_embed_prefix = self.base_bos + self.embed_bos.lstrip()
@@ -114,7 +117,7 @@ class CustomCollator(DataCollatorWithPadding):
         features = {}
 
         # If each sample is a tuple it is of format (instruction, text)
-        #@ lucaswychan remove .strip("\t\n :")
+        # @ lucaswychan remove .strip("\t\n :")
         q_instruction_lens = None
         if isinstance(query[0], (tuple, list)):
             # Pre-build all query strings first for batch tokenization
@@ -129,12 +132,12 @@ class CustomCollator(DataCollatorWithPadding):
                     query_str = instr_str + f[1] + self.embed_eos
                 instr_strs.append(instr_str)
                 query_strs.append(query_str)
-            
+
             # Batch tokenize instruction strings for better performance
             q_instruction_lens = [len(self.tokenizer.tokenize(s)) for s in instr_strs]
             query = query_strs
 
-            #@lucaswychan add checking of passage type, since original approach will assume there is instruction in the passage
+            # @lucaswychan add checking of passage type, since original approach will assume there is instruction in the passage
             # if the query has instruction, then the passage will also have instruction
             # and will not work for the case where there is no instruction in the passage
             # and in our case we have no instruction in the passage
@@ -150,7 +153,7 @@ class CustomCollator(DataCollatorWithPadding):
                         passage_str = instr_str + f[1] + self.embed_eos
                     passage_instr_strs.append(instr_str)
                     passage_strs.append(passage_str)
-                
+
                 d_instruction_lens = [len(self.tokenizer.tokenize(s)) for s in passage_instr_strs]
                 passage = passage_strs
             else:
@@ -163,7 +166,7 @@ class CustomCollator(DataCollatorWithPadding):
             truncation=True,
             max_length=self.query_max_len,
             return_tensors="pt",
-            add_special_tokens=False, # BOS / EOS is already in the prompt
+            add_special_tokens=False,  # BOS / EOS is already in the prompt
         )
         features["passage"] = self.tokenizer(
             passage,
@@ -171,7 +174,7 @@ class CustomCollator(DataCollatorWithPadding):
             truncation=True,
             max_length=self.passage_max_len,
             return_tensors="pt",
-            add_special_tokens=False, # BOS / EOS is already in the prompt
+            add_special_tokens=False,  # BOS / EOS is already in the prompt
         )
 
         if q_instruction_lens:
@@ -182,18 +185,20 @@ class CustomCollator(DataCollatorWithPadding):
                 assert features["passage"]["input_ids"][i, l] != self.tokenizer.pad_token, f"No text to embed: {passage[i]}"
             # Need to be masked out later
             features["query"]["instruction_lens"] = torch.tensor(q_instruction_lens)
-            #@lucaswychan: if there is no instruction in the passage, we don't add instruction_lens
+            # @lucaswychan: if there is no instruction in the passage, we don't add instruction_lens
             if d_instruction_lens:
                 features["passage"]["instruction_lens"] = torch.tensor(d_instruction_lens)
 
         return features
 
+
 @dataclass
 class CustomRandomSampler(torch.utils.data.sampler.RandomSampler):
     """
-    Sampler used when training on multiple datasets to ensure each 
+    Sampler used when training on multiple datasets to ensure each
     batch only contains samples from one dataset for the majority of cases.
     """
+
     total_batch_size: int = 8
     ds_lens: List[int] = None
     _num_samples: int = None
@@ -202,7 +207,7 @@ class CustomRandomSampler(torch.utils.data.sampler.RandomSampler):
 
     @torch.no_grad()
     def __iter__(self) -> Iterator[int]:
-        
+
         if not hasattr(self, "generator") or self.generator is None:
             seed = int(torch.empty((), dtype=torch.int64).random_().item())
             generator = torch.Generator()

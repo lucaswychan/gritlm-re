@@ -1,5 +1,5 @@
 from functools import wraps
-from typing import Callable, Union, Tuple, Any
+from typing import Any, Callable, Tuple, Union
 
 import torch
 from torch import Tensor
@@ -15,13 +15,14 @@ def cached(func: Callable[..., Tensor]):
     :return: A function that returns 1) representation leaf tensors for cache construction, 2) a closure function for
     the 2nd forward and the cached backward. Call 2) with 1) as argument after calling backward on the loss Tensor.
     """
+
     @wraps(func)
     def cache_func(*args, **kwargs):
         rnd_state = RandContext()
         with torch.no_grad():
             reps_no_grad = func(*args, **kwargs)
         if isinstance(reps_no_grad, Tensor):
-            reps_no_grad = (reps_no_grad, )
+            reps_no_grad = (reps_no_grad,)
         else:
             assert all(isinstance(v, Tensor) for v in reps_no_grad)
         leaf_reps = tuple(t.detach().requires_grad_() for t in reps_no_grad)
@@ -40,6 +41,7 @@ def cached(func: Callable[..., Tensor]):
             surrogate.backward()
 
         return leaf_reps + (forward_backward_func,)
+
     return cache_func
 
 
@@ -58,11 +60,13 @@ def cat_input_tensor(func: Callable[..., Tensor]):
     :param func: A loss function
     :return: Decorated loss function for cached results.
     """
+
     @wraps(func)
     def cat_f(*args, **kwargs):
         args_cat = [_cat_tensor_list(x) for x in args]
         kwargs_cat = dict((k, _cat_tensor_list(v)) for k, v in kwargs.values())
         return func(*args_cat, **kwargs_cat)
+
     return cat_f
 
 
@@ -83,9 +87,11 @@ def gather_input_tensor(func: Callable[..., Tensor], axis=0):
     :param axis: The axis the gathered tensors are concatenated.
     :return: Decorated loss function for distributed training.
     """
+
     @wraps(func)
     def f(*args, **kwargs):
         args_gathered = [_maybe_gather_tensor(x, axis=axis) for x in args]
         kwargs_gathered = dict((k, _maybe_gather_tensor(v, axis=axis)) for k, v in kwargs.values())
         return func(*args_gathered, **kwargs_gathered)
+
     return f

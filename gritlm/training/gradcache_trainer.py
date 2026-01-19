@@ -7,19 +7,16 @@ import shutil
 import time
 from typing import TYPE_CHECKING, Optional
 
-# isort: on
-
 import huggingface_hub.utils as hf_hub_utils
 import numpy as np
 import torch
 import torch.distributed as dist
+from grad_cache import GradCache
 from huggingface_hub import ModelCard, create_repo, upload_folder
 from packaging import version
 from torch import nn
 from torch.utils.data import DataLoader, Dataset, IterableDataset, RandomSampler, SequentialSampler
-from transformers import Trainer
-
-from transformers import __version__
+from transformers import Trainer, __version__
 from transformers.configuration_utils import PretrainedConfig
 from transformers.data.data_collator import DataCollator, DataCollatorWithPadding, default_data_collator
 from transformers.debug_utils import DebugOption, DebugUnderflowOverflow
@@ -31,27 +28,12 @@ from transformers.integrations.deepspeed import deepspeed_init, deepspeed_load_c
 from transformers.integrations.tpu import tpu_spmd_dataloader
 from transformers.modelcard import TrainingSummary
 from transformers.modeling_utils import PreTrainedModel, load_sharded_checkpoint, unwrap_model
-from transformers.models.auto.modeling_auto import (
-    MODEL_FOR_CAUSAL_LM_MAPPING_NAMES,
-    MODEL_MAPPING_NAMES,
-)
+from transformers.models.auto.modeling_auto import MODEL_FOR_CAUSAL_LM_MAPPING_NAMES, MODEL_MAPPING_NAMES
 from transformers.optimization import Adafactor, get_scheduler
 from transformers.processing_utils import ProcessorMixin
-from transformers.pytorch_utils import (
-    ALL_LAYERNORM_LAYERS,
-    is_torch_greater_or_equal_than_2_3,
-)
+from transformers.pytorch_utils import ALL_LAYERNORM_LAYERS, is_torch_greater_or_equal_than_2_3
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
-from transformers.trainer_callback import (
-    CallbackHandler,
-    DefaultFlowCallback,
-    ExportableState,
-    PrinterCallback,
-    ProgressCallback,
-    TrainerCallback,
-    TrainerControl,
-    TrainerState,
-)
+from transformers.trainer_callback import CallbackHandler, DefaultFlowCallback, ExportableState, PrinterCallback, ProgressCallback, TrainerCallback, TrainerControl, TrainerState
 from transformers.trainer_pt_utils import (
     DistributedTensorGatherer,
     EvalLoopContainer,
@@ -146,16 +128,14 @@ from transformers.utils import (
 from transformers.utils.deprecation import deprecate_kwarg
 from transformers.utils.quantization_config import QuantizationMethod
 
-from grad_cache import GradCache
+# isort: on
+
 
 if is_accelerate_available():
-    from accelerate import Accelerator, skip_first_batches
+    from accelerate import Accelerator
     from accelerate import __version__ as accelerate_version
-    from accelerate.utils import (
-        DistributedType,
-        GradientAccumulationPlugin,
-        save_fsdp_model,
-    )
+    from accelerate import skip_first_batches
+    from accelerate.utils import DistributedType, GradientAccumulationPlugin, save_fsdp_model
 
     DATA_SAMPLERS = [RandomSampler]
     if version.parse(accelerate_version) > version.parse("0.23.0"):
@@ -230,6 +210,7 @@ def safe_globals():
 
     return torch.serialization.safe_globals(allowlist)
 
+
 # Name of the files used for checkpointing
 TRAINING_ARGS_NAME = "training_args.bin"
 TRAINER_STATE_NAME = "trainer_state.json"
@@ -240,6 +221,7 @@ SCALER_NAME = "scaler.pt"
 FSDP_MODEL_NAME = "pytorch_model_fsdp"
 
 logger = logging.get_logger(__name__)
+
 
 class GradCacheTrainer(Trainer):
     def _save_checkpoint(self, model, trial, metrics=None):
@@ -256,10 +238,7 @@ class GradCacheTrainer(Trainer):
         run_dir = self._get_output_dir(trial=trial)
         output_dir = os.path.join(run_dir, checkpoint_folder)
         if os.path.exists(output_dir) and len(os.listdir(output_dir)) > 0:
-            logger.warning(
-                f"Checkpoint destination directory {output_dir} already exists and is non-empty."
-                "Saving will proceed but saved results may be invalid."
-            )
+            logger.warning(f"Checkpoint destination directory {output_dir} already exists and is non-empty." "Saving will proceed but saved results may be invalid.")
             staging_output_dir = output_dir
         else:
             staging_output_dir = os.path.join(run_dir, f"tmp-{checkpoint_folder}")
@@ -279,11 +258,7 @@ class GradCacheTrainer(Trainer):
             metric_value = metrics[metric_to_check]
 
             operator = np.greater if self.args.greater_is_better else np.less
-            if (
-                self.state.best_metric is None
-                or self.state.best_model_checkpoint is None
-                or operator(metric_value, self.state.best_metric)
-            ):
+            if self.state.best_metric is None or self.state.best_model_checkpoint is None or operator(metric_value, self.state.best_metric):
                 self.state.best_metric = metric_value
                 self.state.best_model_checkpoint = output_dir
 
@@ -344,9 +319,7 @@ class GradCacheTrainer(Trainer):
             return loss.detach(), reps.detach()
         return loss.detach()
 
-    def _inner_training_loop(
-        self, batch_size=None, args=None, resume_from_checkpoint=None, trial=None, ignore_keys_for_eval=None
-    ):
+    def _inner_training_loop(self, batch_size=None, args=None, resume_from_checkpoint=None, trial=None, ignore_keys_for_eval=None):
         self.accelerator.free_memory()
         self._train_batch_size = batch_size
         if self.args.auto_find_batch_size:
@@ -399,10 +372,7 @@ class GradCacheTrainer(Trainer):
             if self.args.n_gpu > 1:
                 # nn.DataParallel(model) replicates the model, creating new variables and module
                 # references registered here no longer work on other gpus, breaking the module
-                raise ValueError(
-                    "Currently --debug underflow_overflow is not supported under DP. Please use DDP"
-                    " (torchrun or torch.distributed.launch (deprecated))."
-                )
+                raise ValueError("Currently --debug underflow_overflow is not supported under DP. Please use DDP" " (torchrun or torch.distributed.launch (deprecated)).")
             else:
                 debug_overflow = DebugUnderflowOverflow(self.model)  # noqa
 
@@ -424,11 +394,7 @@ class GradCacheTrainer(Trainer):
         if not delay_optimizer_creation:
             self.create_optimizer_and_scheduler(num_training_steps=max_steps)
 
-        self.state = TrainerState(
-            stateful_callbacks=[
-                cb for cb in self.callback_handler.callbacks + [self.control] if isinstance(cb, ExportableState)
-            ]
-        )
+        self.state = TrainerState(stateful_callbacks=[cb for cb in self.callback_handler.callbacks + [self.control] if isinstance(cb, ExportableState)])
         self.state.is_hyper_param_search = trial is not None
         self.state.train_batch_size = self._train_batch_size
 
@@ -470,9 +436,7 @@ class GradCacheTrainer(Trainer):
                     model, self.optimizer = self.accelerator.prepare(self.model, self.optimizer)
             else:
                 # to handle cases wherein we pass "DummyScheduler" such as when it is specified in DeepSpeed config.
-                model, self.optimizer, self.lr_scheduler = self.accelerator.prepare(
-                    self.model, self.optimizer, self.lr_scheduler
-                )
+                model, self.optimizer, self.lr_scheduler = self.accelerator.prepare(self.model, self.optimizer, self.lr_scheduler)
         elif self.args.optim in [OptimizerNames.LOMO, OptimizerNames.ADALOMO]:
             # In this case we are in DDP + LOMO, which should be supported
             self.optimizer = self.accelerator.prepare(self.optimizer)
@@ -491,9 +455,7 @@ class GradCacheTrainer(Trainer):
         # ckpt loading
         if resume_from_checkpoint is not None:
             if self.is_deepspeed_enabled:
-                deepspeed_load_checkpoint(
-                    self.model_wrapped, resume_from_checkpoint, load_module_strict=not _is_peft_model(self.model)
-                )
+                deepspeed_load_checkpoint(self.model_wrapped, resume_from_checkpoint, load_module_strict=not _is_peft_model(self.model))
             elif is_sagemaker_mp_enabled() or self.is_fsdp_enabled:
                 self._load_from_checkpoint(resume_from_checkpoint, self.model_wrapped)
 
@@ -526,24 +488,28 @@ class GradCacheTrainer(Trainer):
         elif self.args.fp16:
             dtype = torch.float16
         import os
+
         if os.getenv("BF16", False):
             gc = GradCache(
-                models=[model, model, model],             
-                chunk_sizes=self.gc_chunk_size, 
+                models=[model, model, model],
+                chunk_sizes=self.gc_chunk_size,
                 loss_fn=self.emb_loss_fn,
                 # Somehow autocast turns bf16 -> fp32 here, so cast back if training in bf16
                 get_rep_fn=lambda x: x["q_reps"].to(dtype=dtype) if dtype is not None else x["q_reps"],
             )
         else:
             gc = GradCache(
-                models=[model, model, model],             
-                chunk_sizes=self.gc_chunk_size, 
+                models=[model, model, model],
+                chunk_sizes=self.gc_chunk_size,
                 loss_fn=self.emb_loss_fn,
                 get_rep_fn=lambda x: x["q_reps"],
             )
+
         # If using the .encode function instead, the below does work with FSDP
         # Somehow FSDP requires it to be the forward function
-        def model_call(self, model, model_input): return model(model_input)
+        def model_call(self, model, model_input):
+            return model(model_input)
+
         gc.model_call = model_call.__get__(gc)
         no_sync_except_last = torch.distributed.is_initialized()
 
@@ -556,9 +522,7 @@ class GradCacheTrainer(Trainer):
         steps_trained_progress_bar = None
 
         # Check if continuing training from a checkpoint
-        if resume_from_checkpoint is not None and os.path.isfile(
-            os.path.join(resume_from_checkpoint, TRAINER_STATE_NAME)
-        ):
+        if resume_from_checkpoint is not None and os.path.isfile(os.path.join(resume_from_checkpoint, TRAINER_STATE_NAME)):
             self.state = TrainerState.load_from_json(os.path.join(resume_from_checkpoint, TRAINER_STATE_NAME))
             self.compare_trainer_and_checkpoint_args(self.args, self.state)
             self._load_callback_state()
@@ -573,10 +537,7 @@ class GradCacheTrainer(Trainer):
             logger.info(f"  Continuing training from epoch {epochs_trained}")
             logger.info(f"  Continuing training from global step {self.state.global_step}")
             if not args.ignore_data_skip:
-                logger.info(
-                    f"  Will skip the first {epochs_trained} epochs then the first"
-                    f" {steps_trained_in_current_epoch} batches in the first epoch."
-                )
+                logger.info(f"  Will skip the first {epochs_trained} epochs then the first" f" {steps_trained_in_current_epoch} batches in the first epoch.")
 
         # Update the references
         for attr in ("model", "optimizer", "lr_scheduler"):
@@ -607,11 +568,7 @@ class GradCacheTrainer(Trainer):
             if args.past_index >= 0:
                 self._past = None
 
-            steps_in_epoch = (
-                len(epoch_dataloader)
-                if len_dataloader is not None
-                else args.max_steps * args.gradient_accumulation_steps
-            )
+            steps_in_epoch = len(epoch_dataloader) if len_dataloader is not None else args.max_steps * args.gradient_accumulation_steps
             self.control = self.callback_handler.on_epoch_begin(args, self.state, self.control)
 
             if epoch == epochs_trained and resume_from_checkpoint is not None and steps_trained_in_current_epoch == 0:
@@ -679,8 +636,7 @@ class GradCacheTrainer(Trainer):
                     # We explicitly want to avoid relying on `accelerator.accumulate` for generation training
                     context = (
                         functools.partial(self.accelerator.no_sync, model=model)
-                        if i != len(batch_samples) - 1
-                        and self.accelerator.distributed_type != DistributedType.DEEPSPEED
+                        if i != len(batch_samples) - 1 and self.accelerator.distributed_type != DistributedType.DEEPSPEED
                         else contextlib.nullcontext
                     )
                     with context():
@@ -695,8 +651,8 @@ class GradCacheTrainer(Trainer):
                             # & we can reuse them this way
                             loss_emb_p, p_reps = self.get_loss_no_gas(
                                 model=model,
-                                query=inputs["query"], 
-                                passage=inputs["passage"], 
+                                query=inputs["query"],
+                                passage=inputs["passage"],
                                 q_grad=False,
                                 get_preps=True,
                             )
@@ -710,13 +666,13 @@ class GradCacheTrainer(Trainer):
 
                             assert torch.allclose(loss_emb_q, loss_emb_p), f"{loss_emb_q} != {loss_emb_p}"
                             loss_emb = loss_emb_q
-                        
+
                         elif self.split_emb_full:
                             with self.compute_loss_context_manager():
                                 out = model(query=inputs["query"], passage=inputs["passage"], q_grad=False, pos_grad=False)
                                 loss, q_reps, p_reps = out.loss, out.q_reps, out.p_reps
                                 p_reps = p_reps.detach()
-                                
+
                             if self.args.n_gpu > 1:
                                 loss = loss.mean()  # mean() to average on multi-gpu parallel training
 
@@ -732,7 +688,7 @@ class GradCacheTrainer(Trainer):
 
                             with self.compute_loss_context_manager():
                                 loss = model(q_reps=q_reps, passage=inputs["passage"], p_reps=p_reps, q_grad=False, neg_grad=False).loss
-                                
+
                             if self.args.n_gpu > 1:
                                 loss = loss.mean()  # mean() to average on multi-gpu parallel training
 
@@ -748,7 +704,7 @@ class GradCacheTrainer(Trainer):
 
                             with self.compute_loss_context_manager():
                                 loss = model(query=inputs["query"], p_reps=p_reps, pos_grad=False, neg_grad=False).loss
-                                
+
                             if self.args.n_gpu > 1:
                                 loss = loss.mean()  # mean() to average on multi-gpu parallel training
 
@@ -764,15 +720,15 @@ class GradCacheTrainer(Trainer):
                         elif self.emb_q_only:
                             loss_emb = self.get_loss_no_gas(
                                 model=model,
-                                query=inputs["query"], 
-                                passage=inputs["passage"], 
+                                query=inputs["query"],
+                                passage=inputs["passage"],
                                 p_grad=False,
                             )
                         elif self.emb_p_only:
                             loss_emb = self.get_loss_no_gas(
                                 model=model,
-                                query=inputs["query"], 
-                                passage=inputs["passage"], 
+                                query=inputs["query"],
+                                passage=inputs["passage"],
                                 q_grad=False,
                             )
                         else:
@@ -783,18 +739,12 @@ class GradCacheTrainer(Trainer):
                         tr_loss_step = loss_emb
                         ### MODIFIED END ###
 
-                    if (
-                        args.logging_nan_inf_filter
-                        and not is_torch_xla_available()
-                        and (torch.isnan(tr_loss_step) or torch.isinf(tr_loss_step))
-                    ):
+                    if args.logging_nan_inf_filter and not is_torch_xla_available() and (torch.isnan(tr_loss_step) or torch.isinf(tr_loss_step)):
                         # if loss is nan or inf simply add the average of previous logged losses
                         tr_loss = tr_loss + tr_loss / (1 + self.state.global_step - self._globalstep_last_logged)
                     else:
                         if tr_loss.device != tr_loss_step.device:
-                            raise ValueError(
-                                f"Calculated loss must be on the original device: {tr_loss.device} but device in use is {tr_loss_step.device}"
-                            )
+                            raise ValueError(f"Calculated loss must be on the original device: {tr_loss.device} but device in use is {tr_loss_step.device}")
                         tr_loss = tr_loss + tr_loss_step
 
                     self.current_flos += float(self.floating_point_ops(inputs))
@@ -819,10 +769,7 @@ class GradCacheTrainer(Trainer):
                                     args.max_grad_norm,
                                 )
 
-                            if (
-                                is_accelerate_available()
-                                and self.accelerator.distributed_type == DistributedType.DEEPSPEED
-                            ):
+                            if is_accelerate_available() and self.accelerator.distributed_type == DistributedType.DEEPSPEED:
                                 grad_norm = model.get_global_grad_norm()
                                 # In some cases the grad norm may not return a float
                                 if hasattr(grad_norm, "item"):
@@ -882,19 +829,14 @@ class GradCacheTrainer(Trainer):
                 self.control.should_training_stop = True
 
             self.control = self.callback_handler.on_epoch_end(args, self.state, self.control)
-            self._maybe_log_save_evaluate(
-                tr_loss, grad_norm, model, trial, epoch, ignore_keys_for_eval, start_time, learning_rate=learning_rate
-            )
+            self._maybe_log_save_evaluate(tr_loss, grad_norm, model, trial, epoch, ignore_keys_for_eval, start_time, learning_rate=learning_rate)
 
             if DebugOption.TPU_METRICS_DEBUG in self.args.debug:
                 if is_torch_xla_available():
                     # tpu-comment: Logging debug metrics for PyTorch/XLA (compile, execute times, ops, etc.)
                     xm.master_print(met.metrics_report())
                 else:
-                    logger.warning(
-                        "You enabled PyTorch/XLA debug metrics but you don't have a TPU "
-                        "configured. Check your training configuration if this is unexpected."
-                    )
+                    logger.warning("You enabled PyTorch/XLA debug metrics but you don't have a TPU " "configured. Check your training configuration if this is unexpected.")
             if self.control.should_training_stop:
                 break
 
