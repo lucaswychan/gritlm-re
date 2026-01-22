@@ -12,6 +12,10 @@
 
 This repository is the training code for the embedding model used in the paper 'Do Reasoning Models Enhance Embedding Models'. We greatly thanks the work from [Generative Representational Instruction Tuning](https://arxiv.org/abs/2402.09906). In the original GritLM implementation, they consider both embedding and generative training setting. In our work, however, we discard all generative settings as it is not necessary to train the embedding models.
 
+## Abstract
+
+State-of-the-art text embedding models are increasingly derived from decoder-only Large Language Model (LLM) backbones adapted via contrastive learning. Given the emergence of reasoning models trained via Reinforcement Learning with Verifiable Reward (RLVR), a critical question is whether enhanced reasoning capabilities translate to superior semantic representations. Contrary to expectation, our evaluation on MTEB and BRIGHT reveals a **null effect**: embedding models initialized from RLVR-tuned backbones yield no consistent performance advantage over their base counterparts when subjected to identical training recipes. To explain this paradox, we introduce **H**ierarchical **R**epresentation **S**imilarity **A**nalysis (HRSA), a framework that decomposes similarity across representation, geometry, and function levels. HRSA reveals that while RLVR reorganizes local geometry and induces coordinate basis drift during prolonged training, it largely preserves the latent manifold’s global geometry and linear readout directions. Consequently, subsequent contrastive learning drives strong alignment between base- and reasoning-initialized models, a phenomenon we term **Manifold Realignment**. Our findings suggest that, unlike Supervised Fine-Tuning (SFT), RLVR primarily optimizes trajectories within an existing semantic landscape rather than fundamentally restructuring the landscape itself.
+
 ## Installation
 
 We use `uv` to manage the dependencies. FlashAttention should be separately built as using `uv sync` to build is troublesome.  
