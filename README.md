@@ -3,7 +3,7 @@
 # Do Reasoning Models Enhance Embedding Models? 
 ## (Training Codes Repository)
 
-<p align="center">🏆  <a href="https://github.com/lucaswychan">Arxiv Paper</a>&nbsp&nbsp | &nbsp&nbsp🤗 <a href="https://huggingface.co/collections/lucaswychan/reasoning-embedding">Hugging Face</a></p> 
+<p align="center">🏆  <a href="https://arxiv.org/abs/2601.21192">Arxiv Paper</a>&nbsp&nbsp | &nbsp&nbsp🤗 <a href="https://huggingface.co/collections/lucaswychan/reasoning-embedding">Hugging Face</a></p> 
 
 
 <img src="assests/re-thumbnail.png" alt="thumbnail" width="400">
@@ -48,6 +48,15 @@ bash scripts/training/train_embonly.sh
 
 Please cite our paper 😊
 ```bibtex
+@misc{chan2026reasoningmodelsenhanceembedding,
+      title={Do Reasoning Models Enhance Embedding Models?}, 
+      author={Wun Yu Chan and Shaojin Chen and Huihao Jing and Kwun Hang Lau and Elton Chun-Chai Li and Zihao Wang and Haoran Li and Yangqiu Song},
+      year={2026},
+      eprint={2601.21192},
+      archivePrefix={arXiv},
+      primaryClass={cs.AI},
+      url={https://arxiv.org/abs/2601.21192}, 
+}
 ```
 
 And also cite the original paper of GritLM 😊
