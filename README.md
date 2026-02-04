@@ -14,18 +14,31 @@ This repository is the training code for the embedding model used in the paper '
 
 ## Abstract
 
-State-of-the-art text embedding models are increasingly derived from decoder-only Large Language Model (LLM) backbones adapted via contrastive learning. Given the emergence of reasoning models trained via Reinforcement Learning with Verifiable Reward (RLVR), a critical question is whether enhanced reasoning capabilities translate to superior semantic representations. Contrary to expectation, our evaluation on MTEB and BRIGHT reveals a **null effect**: embedding models initialized from RLVR-tuned backbones yield no consistent performance advantage over their base counterparts when subjected to identical training recipes. To explain this paradox, we introduce **H**ierarchical **R**epresentation **S**imilarity **A**nalysis (HRSA), a framework that decomposes similarity across representation, geometry, and function levels. HRSA reveals that while RLVR reorganizes local geometry and induces coordinate basis drift during prolonged training, it largely preserves the latent manifold’s global geometry and linear readout directions. Consequently, subsequent contrastive learning drives strong alignment between base- and reasoning-initialized models, a phenomenon we term **Manifold Realignment**. Our findings suggest that, unlike Supervised Fine-Tuning (SFT), RLVR primarily optimizes trajectories within an existing semantic landscape rather than fundamentally restructuring the landscape itself.
+State-of-the-art embedding models are increasingly derived from decoder-only Large Language Model (LLM) backbones adapted via contrastive learning. Given the emergence of reasoning models trained via Reinforcement Learning with Verifiable Rewards (RLVR), a natural question arises: do enhanced reasoning translate to superior semantic representations when these models serve as embedding initializations? Contrary to expectation, our evaluation on MTEB and BRIGHT reveals a **null effect**: embedding models initialized from RLVR-tuned backbones yield no consistent performance advantage over their base counterparts when subjected to identical training recipes. To unpack this paradox, we introduce **H**ierarchical **R**epresentation **S**imilarity **A**nalysis (HRSA), a framework that decomposes similarity across representation, geometry, and function levels. HRSA reveals that while RLVR induces irreversible latent manifold's local geometry reorganization and reversible coordinate basis drift, it preserves the global manifold geometry and linear readout. Consequently, subsequent contrastive learning drives strong alignment between base- and reasoning-initialized models, a phenomenon we term **Manifold Realignment**. Empirically, our findings suggest that unlike Supervised Fine-Tuning (SFT), RLVR optimizes trajectories within an existing semantic landscape rather than fundamentally restructuring the landscape itself.
 
 ## Installation
 
-We use `uv` to manage the dependencies. FlashAttention should be separately built as using `uv sync` to build is troublesome.  
-[Install `uv`](https://docs.astral.sh/uv/getting-started/installation/)
+Clone the repository and initialize the submodule:
 
 ```bash
+git clone https://github.com/lucaswychan/gritlm-re.git
+cd gritlm-re
+```
+
+Install dependencies using either `uv` (recommended) or `pip`:
+
+```bash
+# Method 1: Using uv (Install uv first: https://docs.astral.sh/uv/getting-started/installation/)
 uv venv .venv --python 3.12
 source .venv/bin/activate
 uv pip install -r requirements.txt
 uv pip install flash-attn --no-build-isolation
+
+# Method 2: Using pip
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+pip install flash-attn --no-build-isolation
 ```
 
 If you want to use GradCache, you need to use the one in this repository
@@ -33,6 +46,18 @@ If you want to use GradCache, you need to use the one in this repository
 cd gritlm/training/GradCache
 uv pip install -e .
 cd ../..
+```
+
+**⚠️ Important:** Enable bidirectional attention (required for embedding models):
+
+```bash
+# Method 1: For transformers<5.0.0 (default in requirements.txt.)
+cp models/modeling_qwen2_v4.py .venv/lib/python3.12/site-packages/transformers/models/qwen2/modeling_qwen2.py
+cp models/modeling_qwen3_v4.py .venv/lib/python3.12/site-packages/transformers/models/qwen3/modeling_qwen3.py
+
+# Method 2: For transformers>=5.0.0 (if you somehow modified the training codes that is adapt to transformers>=5.0.0)
+cp models/modeling_qwen2.py .venv/lib/python3.12/site-packages/transformers/models/qwen2/modeling_qwen2.py
+cp models/modeling_qwen3.py .venv/lib/python3.12/site-packages/transformers/models/qwen3/modeling_qwen3.py
 ```
 
 ## Embedding Model Training
