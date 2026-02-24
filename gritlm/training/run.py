@@ -426,7 +426,7 @@ def main():
         trainer = GradCacheTrainer(**trainer_kwargs)
         logger.info("GradCacheTrainer initialized successfully")
         trainer.gc_chunk_size = gc_chunk_size
-        trainer.emb_loss_fn = model.emb_loss_fn
+        trainer.emb_loss_fn = model.combined_loss_fn
         trainer.split_emb = training_args.split_emb
         trainer.split_emb_full = training_args.split_emb_full
         trainer.emb_p_only = training_args.emb_p_only
