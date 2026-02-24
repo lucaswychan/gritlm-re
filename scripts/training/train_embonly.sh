@@ -16,6 +16,9 @@
 ######################
 ### Set enviroment ###
 ######################
+source .venv/bin/activate
+cd gritlm
+
 export CUDA_VISIBLE_DEVICES=0,5,6,7
 export GPUS_PER_NODE=4
 
@@ -46,7 +49,7 @@ export NVIDIA_TF32_OVERRIDE=1
 # Note: Use --report_to none flag instead of WANDB_DISABLED env var (deprecated in wandb v5)
 
 LAUNCHER="accelerate launch \
-    --config_file ./scripts/configs/config_8gpusfsdp_qwen.yml \
+    --config_file ../scripts/configs/config_8gpusfsdp_qwen.yml \
     --num_machines 1 \
     --num_processes $GPUS_PER_NODE \
     --main_process_port 8001 \
@@ -55,7 +58,7 @@ LAUNCHER="accelerate launch \
     --tee 1 \
     "
 
-TRAIN_DATA=/data/wychanbu/re_data/hard-neg-with-stem # replace with the directory of your training data
+TRAIN_DATA=/data/wychanbu/re_data/hard-neg # replace with the directory of your training data
 
 export CMD=" \
     -m training.run \
