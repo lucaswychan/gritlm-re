@@ -82,6 +82,8 @@ class CustomTrainingArguments(TrainingArguments):
     debiased: bool = field(default=False, metadata={"help": "Use debiased contrastive loss"})
     tau_plus: float = field(default=0.1, metadata={"help": "tau+ for debiased contrastive loss"})
 
+    sigreg_weight: float = field(default=0.0, metadata={"help": "Weight for SIGReg regularization loss added on top of the contrastive loss (0.0 = disabled)."})
+
     use_muon: bool = field(default=False, metadata={"help": "Use muon optimizer"})
     use_fused_adamw: bool = field(default=False, metadata={"help": "Use fused AdamW optimizer for 5-10% speedup"})
 
@@ -89,8 +91,3 @@ class CustomTrainingArguments(TrainingArguments):
     torch_compile: bool = field(default=False, metadata={"help": "Use torch.compile for 20-50% speedup"})
     torch_compile_mode: str = field(default="reduce-overhead", metadata={"help": "Torch compile mode: default, reduce-overhead, max-autotune"})
     torch_compile_backend: str = field(default="inductor", metadata={"help": "Torch compile backend"})
-
-    # Ring-based training (alternative to GradCache)
-    use_ring_loss: bool = field(default=False, metadata={"help": "Use ring-based contrastive loss instead of GradCache (faster, more memory efficient)"})
-    ring_head_dim: int = field(default=256, metadata={"help": "Head dimension for ring loss (must be 16, 32, 64, 128, or 256)"})
-    use_inf_loss: bool = field(default=True, metadata={"help": "Use InfProb (Flash-optimized) vs RingProb for ring loss"})

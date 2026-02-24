@@ -17,7 +17,6 @@ from .arguments import CustomTrainingArguments, DataArguments, ModelArguments
 from .data import CustomCollator, CustomDataset, CustomRandomSampler
 from .gradcache_trainer import GradCacheTrainer
 from .model import GritLMTrainModel
-from .ring_trainer import RingTrainer
 
 if is_sagemaker_mp_enabled():
     import smdistributed.modelparallel.torch as smp
@@ -232,6 +231,7 @@ def main():
         debiased=training_args.debiased,
         tau_plus=training_args.tau_plus,
         temperature=training_args.temperature,
+        sigreg_weight=training_args.sigreg_weight,
         projection=model_args.projection,
         attn=model_args.attn,
         attn_implementation=model_args.attn_implementation,
@@ -419,16 +419,7 @@ def main():
     }
 
     # Choose trainer based on configuration
-    if training_args.use_ring_loss:
-        # Use Ring-based trainer (more efficient, no GradCache needed)
-        logger.info(f"Creating RingTrainer with head_dim={training_args.ring_head_dim}, use_inf_loss={training_args.use_inf_loss}")
-        trainer = RingTrainer(**trainer_kwargs)
-        # Set ring-specific attributes
-        trainer.temperature = training_args.temperature
-        trainer.use_inf_loss = training_args.use_inf_loss
-        trainer.head_dim = training_args.ring_head_dim
-        logger.info(f"RingTrainer initialized with " f"temperature={training_args.temperature}, " f"use_inf_loss={training_args.use_inf_loss}, " f"head_dim={training_args.ring_head_dim}")
-    elif gc_chunk_size is not None:
+    if gc_chunk_size is not None:
         # Use GradCache trainer (original implementation)
         logger.info(f"Creating GradCacheTrainer (gc_chunk_size={gc_chunk_size})...")
         logger.info("Initializing GradCacheTrainer...")
