@@ -16,9 +16,7 @@ dotenv==0.9.9
 einops==0.8.1
 eval-type-backport==0.2.2
 filelock==3.20.0
-flash-attn==2.8.3
 frozenlist==1.7.0
-fsspec==2025.9.0
 gitdb==4.0.12
 gitpython==3.1.45
 hf-xet==1.1.10
