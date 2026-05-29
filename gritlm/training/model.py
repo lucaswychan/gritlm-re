@@ -262,6 +262,22 @@ class GritLMTrainModel(GritLM):
         self.sigreg_weight = sigreg_weight
         self.sigreg = SIGReg() if sigreg_weight > 0.0 else None
 
+    def _scale_for_sigreg(self, reps: torch.Tensor) -> torch.Tensor:
+        """Rescale embeddings so that 1D projections have ~unit variance.
+
+        SIGReg's reference CF is exp(-t²/2), the CF of N(0,1).  For L2-normalised
+        unit vectors in D dimensions the projection onto any direction has variance
+        1/D, so the empirical CF stays near 1 for all t in [0,3].  The error
+        (ECF - phi)² is then dominated by the (1 - phi)² term and its gradient
+        pushes embeddings toward *higher* anisotropy — the exact opposite of the
+        intended effect.  Multiplying by sqrt(D) gives projections with unit
+        variance, matching the Gaussian target and making the loss zero for a
+        perfectly isotropic distribution on the sphere.
+        """
+        if self.normalized:
+            return reps * (reps.shape[-1] ** 0.5)
+        return reps
+
     @property
     def combined_loss_fn(self):
         """Combined contrastive + SIGReg loss for the GradCache path.
@@ -280,14 +296,16 @@ class GritLMTrainModel(GritLM):
         emb_loss_fn = self.emb_loss_fn
         sigreg = self.sigreg
         sigreg_weight = self.sigreg_weight
+        scale_for_sigreg = self._scale_for_sigreg
 
         def _combined(q_reps, p_reps):
-            loss = emb_loss_fn(q_reps, p_reps)
+            contrastive_loss = emb_loss_fn(q_reps, p_reps)
             all_reps = torch.cat([q_reps, p_reps], dim=0)
             world_size = dist.get_world_size() if dist.is_initialized() else 1
             n_global = all_reps.size(0) * world_size
-            loss_sigreg = sigreg(all_reps, n_global=n_global).to(loss.dtype)
-            return loss + sigreg_weight * loss_sigreg
+            sigreg_loss = sigreg(scale_for_sigreg(all_reps), n_global=n_global).to(contrastive_loss.dtype)
+            return (1 - sigreg_weight) * contrastive_loss + sigreg_weight * sigreg_loss # changed from (1 - sigreg_weight) * contrastive_loss + sigreg_weight * sigreg_loss to (1 - sigreg_weight) * contrastive_loss + sigreg_weight * sigreg_loss
+            # return contrastive_loss + sigreg_weight * sigreg_loss
 
         return _combined
 
@@ -376,11 +394,11 @@ class GritLMTrainModel(GritLM):
             # calls forward() with passage=None per chunk; p_reps stays None.
             world_size = dist.get_world_size() if dist.is_initialized() else 1
             n_global = all_reps.size(0) * world_size
-            loss_sigreg = self.sigreg(all_reps, n_global=n_global).to(loss_emb.dtype)
+            loss_sigreg = self.sigreg(self._scale_for_sigreg(all_reps), n_global=n_global).to(loss_emb.dtype)
 
         loss = loss_emb
         if loss_sigreg is not None:
-            loss = loss_emb + self.sigreg_weight * loss_sigreg
+            loss = (1 - self.sigreg_weight) * loss_emb + self.sigreg_weight * loss_sigreg
 
         # Also return q_reps in case of GradCache
         return GritLMTrainOutput(
