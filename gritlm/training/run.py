@@ -235,6 +235,7 @@ def main():
         projection=model_args.projection,
         attn=model_args.attn,
         attn_implementation=model_args.attn_implementation,
+        reset_weight=model_args.reset_weight,
         torch_dtype=training_dtype,
         use_cache=False,
         # Critical to make Mixtral work
