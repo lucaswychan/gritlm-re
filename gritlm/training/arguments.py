@@ -26,6 +26,7 @@ class ModelArguments:
         },
     )
     projection: int = field(default=None, metadata={"help": "Optional linear learned embedding down projection"})
+    reset_weight: bool = field(default=False, metadata={"help": "Reset the base model weights to their default random initialization before training. Useful for studying whether pretrained weights affect training outcomes."})
 
 
 @dataclass

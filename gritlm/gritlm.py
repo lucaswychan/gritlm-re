@@ -16,6 +16,7 @@ class GritLM(torch.nn.Module):
         is_inference: bool = True,
         embed_eos: str = "",
         attn: str = "bb",
+        reset_weight: bool = False,
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
         **kwargs,  # Passed to the model, e.g. `attn_implementation`, `torch_dtype` etc.
     ) -> None:
@@ -30,6 +31,15 @@ class GritLM(torch.nn.Module):
             self.model = AutoModel.from_pretrained(model_name_or_path, trust_remote_code=True, **kwargs)
             self.model.config.use_cache = False
             print(f"Model dtype: {self.model.dtype}")
+
+        if reset_weight:
+            num_reset = 0
+            modules = list(self.model.modules())
+            for module in modules:
+                if hasattr(module, "reset_parameters"):
+                    module.reset_parameters()
+                    num_reset += 1
+            print(f"Reset weights of {num_reset} modules out of {len(modules)} in the base model")
         self.embedding_attr = None
 
         self.projection = torch.nn.Linear(in_features=self.model.config.hidden_size, out_features=int(projection), dtype=self.model.dtype) if projection is not None else None

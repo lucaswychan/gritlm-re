@@ -13,6 +13,38 @@ from transformers.file_utils import ModelOutput
 
 logger = logging.getLogger(__name__)
 
+class SIGReg(torch.nn.Module):
+    def __init__(self, knots=17):
+        super().__init__()
+        t = torch.linspace(0, 3, knots, dtype=torch.float32)
+        dt = 3 / (knots - 1)
+        weights = torch.full((knots,), 2 * dt, dtype=torch.float32)
+        weights[[0, -1]] = dt
+        window = torch.exp(-t.square() / 2.0)
+        self.register_buffer("t", t)
+        self.register_buffer("phi", window)
+        self.register_buffer("weights", weights * window)
+
+    def forward(self, proj, num_slices: int = 256, n_global: Optional[int] = None):
+        # Run SIGReg in fp32 to avoid bf16/fp32 matmul mismatches and keep
+        # trigonometric computations numerically stable under mixed precision.
+        with torch.autocast(device_type=proj.device.type, enabled=False):
+            proj = proj.float()
+            t = self.t.to(device=proj.device, dtype=proj.dtype)
+            phi = self.phi.to(device=proj.device, dtype=proj.dtype)
+            weights = self.weights.to(device=proj.device, dtype=proj.dtype)
+
+            A = torch.randn(proj.size(-1), num_slices, device=proj.device, dtype=proj.dtype)
+            A = A.div_(A.norm(p=2, dim=0))
+            x_t = (proj @ A).unsqueeze(-1) * t
+            err = (x_t.cos().mean(-3) - phi).square() + x_t.sin().mean(-3).square()
+            # Use the global batch size for consistent scaling across device counts.
+            # In distributed training n_global = N_local * world_size so that
+            # sigreg_weight does not need to be re-tuned when changing GPU count.
+            n = n_global if n_global is not None else proj.size(-2)
+            statistic = (err @ weights) * n
+            return statistic.mean()
+
 
 @dataclass
 class GritLMTrainOutput(ModelOutput):
@@ -21,6 +53,7 @@ class GritLMTrainOutput(ModelOutput):
     loss: Optional[Tensor] = None
     loss_emb: Optional[Tensor] = None
     loss_gen: Optional[Tensor] = None
+    loss_sigreg: Optional[Tensor] = None
 
 
 class DistributedContrastiveLoss:
@@ -220,11 +253,61 @@ class GritLMTrainModel(GritLM):
         negatives_cross_device: bool = False,
         debiased: bool = False,
         tau_plus: float = 0.1,
+        sigreg_weight: float = 0.0,
         **kwargs,
     ):
         super().__init__(**kwargs, is_inference=False)
         self.emb_loss_fn = DistributedContrastiveLoss(temperature, negatives_cross_device, debiased=debiased, tau_plus=tau_plus)
         self.config = self.model.config  # Required for accelerate DeepSpeed integration
+        self.sigreg_weight = sigreg_weight
+        self.sigreg = SIGReg() if sigreg_weight > 0.0 else None
+
+    def _scale_for_sigreg(self, reps: torch.Tensor) -> torch.Tensor:
+        """Rescale embeddings so that 1D projections have ~unit variance.
+
+        SIGReg's reference CF is exp(-t²/2), the CF of N(0,1).  For L2-normalised
+        unit vectors in D dimensions the projection onto any direction has variance
+        1/D, so the empirical CF stays near 1 for all t in [0,3].  The error
+        (ECF - phi)² is then dominated by the (1 - phi)² term and its gradient
+        pushes embeddings toward *higher* anisotropy — the exact opposite of the
+        intended effect.  Multiplying by sqrt(D) gives projections with unit
+        variance, matching the Gaussian target and making the loss zero for a
+        perfectly isotropic distribution on the sphere.
+        """
+        if self.normalized:
+            return reps * (reps.shape[-1] ** 0.5)
+        return reps
+
+    @property
+    def combined_loss_fn(self):
+        """Combined contrastive + SIGReg loss for the GradCache path.
+
+        GradCache never calls forward() with both query and passage at the same
+        time, so the SIGReg guard inside forward() never fires.  GradCache
+        does however call loss_fn(q_reps, p_reps) in build_cache() on the full
+        assembled local batch.  Returning this combined callable as the GradCache
+        loss_fn injects SIGReg at that point: its gradient flows into the cache
+        and is then propagated back into the encoder via the surrogate dot-product
+        in forward_backward(), exactly like the contrastive gradient.
+        """
+        if self.sigreg is None:
+            return self.emb_loss_fn
+
+        emb_loss_fn = self.emb_loss_fn
+        sigreg = self.sigreg
+        sigreg_weight = self.sigreg_weight
+        scale_for_sigreg = self._scale_for_sigreg
+
+        def _combined(q_reps, p_reps):
+            contrastive_loss = emb_loss_fn(q_reps, p_reps)
+            all_reps = torch.cat([q_reps, p_reps], dim=0)
+            world_size = dist.get_world_size() if dist.is_initialized() else 1
+            n_global = all_reps.size(0) * world_size
+            sigreg_loss = sigreg(scale_for_sigreg(all_reps), n_global=n_global).to(contrastive_loss.dtype)
+            return (1 - sigreg_weight) * contrastive_loss + sigreg_weight * sigreg_loss # changed from (1 - sigreg_weight) * contrastive_loss + sigreg_weight * sigreg_loss to (1 - sigreg_weight) * contrastive_loss + sigreg_weight * sigreg_loss
+            # return contrastive_loss + sigreg_weight * sigreg_loss
+
+        return _combined
 
     def encode(self, features):
         if features is None:
@@ -302,13 +385,29 @@ class GritLMTrainModel(GritLM):
 
         loss_emb = self.emb_loss_fn(q_reps, p_reps) if (q_reps is not None and p_reps is not None) else None
 
+        loss_sigreg = None
+        if self.sigreg is not None and q_reps is not None and p_reps is not None:
+            all_reps = torch.cat([q_reps, p_reps], dim=0)  # (N + N*M, D)
+            # Pass the global batch size so the test statistic scales correctly
+            # with world size. Memory stays proportional to N_local — no gather.
+            # Note: SIGReg is skipped in the GradCache path because GradCache
+            # calls forward() with passage=None per chunk; p_reps stays None.
+            world_size = dist.get_world_size() if dist.is_initialized() else 1
+            n_global = all_reps.size(0) * world_size
+            loss_sigreg = self.sigreg(self._scale_for_sigreg(all_reps), n_global=n_global).to(loss_emb.dtype)
+
+        loss = loss_emb
+        if loss_sigreg is not None:
+            loss = (1 - self.sigreg_weight) * loss_emb + self.sigreg_weight * loss_sigreg
+
         # Also return q_reps in case of GradCache
         return GritLMTrainOutput(
             q_reps=q_reps,
             p_reps=p_reps,
-            loss=loss_emb,
+            loss=loss,
             loss_emb=loss_emb,
             loss_gen=None,
+            loss_sigreg=loss_sigreg,
         )
 
     def gradient_checkpointing_enable(self, *args, **kwargs):

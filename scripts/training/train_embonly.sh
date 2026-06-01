@@ -23,7 +23,7 @@ export CUDA_VISIBLE_DEVICES=0,5,6,7
 export GPUS_PER_NODE=4
 
 export TORCH_CUDA_ARCH_LIST="8.9"
-export HF_HOME=~/.cache/hugginface
+export HF_HOME=/data/wychanbu/hugginface
 
 # Optimized NCCL settings for multi-GPU training
 # export NCCL_P2P_DISABLE=1 
@@ -50,6 +50,7 @@ export NVIDIA_TF32_OVERRIDE=1
 
 LAUNCHER="accelerate launch \
     --config_file ../scripts/configs/config_8gpusfsdp_qwen.yml \
+    --config_file ../scripts/configs/config_8gpusfsdp_qwen.yml \
     --num_machines 1 \
     --num_processes $GPUS_PER_NODE \
     --main_process_port 8001 \
@@ -59,11 +60,12 @@ LAUNCHER="accelerate launch \
     "
 
 TRAIN_DATA=/data/wychanbu/re_data/hard-neg # replace with the directory of your training data
+TRAIN_DATA=/data/wychanbu/re_data/hard-neg # replace with the directory of your training data
 
 export CMD=" \
     -m training.run \
-    --output_dir /data/wychanbu/re_models/Qwen3-0.6B-hard_neg_with_stem_2 \
-    --model_name_or_path Qwen/Qwen3-0.6B \
+    --output_dir /data/wychanbu/re_models/emb_model_with_sigreg \
+    --model_name_or_path Qwen/Qwen2.5-0.5B \
     --train_data $TRAIN_DATA \
     --learning_rate 2e-5 \
     --weight_decay 0.05 \
@@ -79,18 +81,17 @@ export CMD=" \
     --negatives_cross_device \
     --query_max_len 512 \
     --passage_max_len 512 \
-    --mode embedding \
     --logging_steps 1 \
     --bf16 \
     --pooling_method mean \
-    --use_unique_indices \
-    --attn bbcc \
+    --attn bb \
     --attn_implementation flash_attention_2 \
     --save_steps 200 \
     --dataloader_num_workers 4 \
     --dataloader_pin_memory \
     --report_to none \
     --gradient_checkpointing \
+    --sigreg_weight 0.5 \
     "
 # Note: torch.compile is automatically disabled with FSDP due to compatibility issues
 # For single-GPU training, you can add: --torch_compile --torch_compile_mode reduce-overhead
