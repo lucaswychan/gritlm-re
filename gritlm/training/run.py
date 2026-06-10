@@ -9,6 +9,7 @@ from pathlib import Path
 import torch
 import torch.distributed as dist
 from transformers import AutoConfig, AutoTokenizer, HfArgumentParser, Trainer, set_seed
+from transformers.training_args import OptimizerNames
 from transformers.utils import is_sagemaker_mp_enabled
 
 import datasets
@@ -130,6 +131,12 @@ def main():
     if training_args.gradient_checkpointing:
         training_args.gradient_checkpointing_kwargs = {"use_reentrant": False}
 
+    if training_args.use_fused_adamw:
+        if training_args.use_muon:
+            raise ValueError("Cannot use --use_fused_adamw together with --use_muon")
+        training_args.optim = OptimizerNames.ADAMW_TORCH_FUSED
+        logger.info("Using fused AdamW optimizer")
+
     logger.info("Training/evaluation parameters %s", training_args)
     logger.info("Model parameters %s", model_args)
     logger.info("Data parameters %s", data_args)
@@ -140,7 +147,10 @@ def main():
     # If embedding mode with grad accumulation, handle it manually inside forward of GradCacheTrainer.
     gc_chunk_size = None
     if (training_args.gradient_accumulation_steps > 1) and (training_args.negatives_cross_device):
-        gc_chunk_size = training_args.per_device_train_batch_size
+        original_per_device_batch_size = training_args.per_device_train_batch_size
+        gc_chunk_size = training_args.gc_chunk_size or original_per_device_batch_size
+        if gc_chunk_size <= 0:
+            raise ValueError("--gc_chunk_size must be a positive integer")
         training_args.per_device_train_batch_size = training_args.per_device_train_batch_size * training_args.gradient_accumulation_steps
         training_args.gradient_accumulation_steps = 1
 

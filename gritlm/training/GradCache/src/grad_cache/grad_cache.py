@@ -1,4 +1,5 @@
 import logging
+import os
 from collections import UserDict
 from contextlib import nullcontext
 from itertools import repeat
@@ -62,6 +63,9 @@ class GradCache:
         self.scaler = scaler
 
         self._get_input_tensors_strict = False
+        self.skip_rng_state = os.getenv("GRITLM_GC_NO_RNG", "0") == "1"
+        if self.skip_rng_state:
+            logger.info("Skipping GradCache RNG state capture because GRITLM_GC_NO_RNG=1")
 
     def __call__(self, *args, **kwargs):
         """
@@ -182,9 +186,9 @@ class GradCache:
         rnd_states = []
         model_reps = []
 
-        with torch.no_grad():
+        with torch.inference_mode():
             for x in model_inputs:
-                rnd_states.append(RandContext(*self.get_input_tensors(x)))
+                rnd_states.append(nullcontext() if self.skip_rng_state else RandContext(*self.get_input_tensors(x)))
                 y = self.model_call(model, x)
                 model_reps.append(self.get_reps(y))
 

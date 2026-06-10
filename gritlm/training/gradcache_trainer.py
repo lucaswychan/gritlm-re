@@ -511,7 +511,13 @@ class GradCacheTrainer(Trainer):
             return model(model_input)
 
         gc.model_call = model_call.__get__(gc)
-        no_sync_except_last = torch.distributed.is_initialized()
+        # FSDP no_sync() retains the full *unsharded* gradient buffer (~model-size) across all
+        # GradCache chunks, which combined with the resident optimizer states causes the step-2
+        # OOM. Default to per-chunk reduce-scatter (sharded grads) so memory stays bounded; the
+        # accumulated gradient is mathematically identical because FSDP's cross-rank reduction is
+        # linear over the chunk sum. Set GRITLM_GC_NO_SYNC=1 to restore the comm-saving (but
+        # higher-memory) behavior on GPUs with spare VRAM.
+        no_sync_except_last = torch.distributed.is_initialized() and os.getenv("GRITLM_GC_NO_SYNC", "0") == "1"
 
         ### MODIFIED END ###
 
@@ -559,10 +565,12 @@ class GradCacheTrainer(Trainer):
         if args.eval_on_start:
             self._evaluate(trial, ignore_keys_for_eval, skip_scheduler=True)
 
+        model.train()
         for epoch in range(epochs_trained, num_train_epochs):
             epoch_dataloader = train_dataloader
             if hasattr(epoch_dataloader, "set_epoch"):
                 epoch_dataloader.set_epoch(epoch)
+            model.train()
 
             # Reset the past mems state at the beginning of each epoch if necessary.
             if args.past_index >= 0:
@@ -641,7 +649,6 @@ class GradCacheTrainer(Trainer):
                     )
                     with context():
                         ### MODIFIED START - Embedding mode only ###
-                        model.train()
                         inputs = self._prepare_inputs(inputs)
 
                         # Split up the embedding forward to save memory eq to ~1 batch size
@@ -805,6 +812,7 @@ class GradCacheTrainer(Trainer):
                             start_time,
                             learning_rate=learning_rate,
                         )
+                        model.train()
                     else:
                         self.control = self.callback_handler.on_substep_end(args, self.state, self.control)
 
@@ -830,6 +838,7 @@ class GradCacheTrainer(Trainer):
 
             self.control = self.callback_handler.on_epoch_end(args, self.state, self.control)
             self._maybe_log_save_evaluate(tr_loss, grad_norm, model, trial, epoch, ignore_keys_for_eval, start_time, learning_rate=learning_rate)
+            model.train()
 
             if DebugOption.TPU_METRICS_DEBUG in self.args.debug:
                 if is_torch_xla_available():

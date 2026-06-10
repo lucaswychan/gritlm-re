@@ -87,6 +87,7 @@ class CustomTrainingArguments(TrainingArguments):
 
     use_muon: bool = field(default=False, metadata={"help": "Use muon optimizer"})
     use_fused_adamw: bool = field(default=False, metadata={"help": "Use fused AdamW optimizer for 5-10% speedup"})
+    gc_chunk_size: Optional[int] = field(default=None, metadata={"help": "GradCache chunk size. Defaults to the original per-device batch size."})
 
     # Performance optimizations
     torch_compile: bool = field(default=False, metadata={"help": "Use torch.compile for 20-50% speedup"})

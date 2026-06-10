@@ -1,4 +1,5 @@
 import logging
+import os
 from dataclasses import dataclass
 from typing import Dict, Optional
 
@@ -103,12 +104,9 @@ class DistributedContrastiveLoss:
 
     def __call__(self, q_reps, p_reps):
         if self.negatives_cross_device:
-            # Gather representations from all processes so that we can build a
-            # larger negative set. Both positive and negative samples are
-            # gathered; this could be optimised further but keeps the logic
-            # simple.
-            q_reps = self._dist_gather_tensor(q_reps)
-            p_reps = self._dist_gather_tensor(p_reps)
+            # Gather q/p in one collective, then restore the same rank-major
+            # ordering as two independent gathers.
+            q_reps, p_reps = self._dist_gather_qp(q_reps, p_reps)
 
         if self.debiased:
             return self._debiased_contrastive_loss(q_reps, p_reps)
@@ -154,6 +152,23 @@ class DistributedContrastiveLoss:
             dist.all_gather(all_tensors, t)
             all_tensors[self.rank] = t
             return torch.cat(all_tensors, dim=0)
+
+    def _dist_gather_qp(self, q_reps: torch.Tensor, p_reps: torch.Tensor):
+        if self.world_size == 1:
+            return q_reps, p_reps
+
+        q_local_bs = q_reps.size(0)
+        p_local_bs = p_reps.size(0)
+        local_total_bs = q_local_bs + p_local_bs
+        gathered = self._dist_gather_tensor(torch.cat([q_reps, p_reps], dim=0))
+        rank_chunks = gathered.split(local_total_bs, dim=0)
+        q_chunks = []
+        p_chunks = []
+        for chunk in rank_chunks:
+            q_chunk, p_chunk = chunk.split((q_local_bs, p_local_bs), dim=0)
+            q_chunks.append(q_chunk)
+            p_chunks.append(p_chunk)
+        return torch.cat(q_chunks, dim=0), torch.cat(p_chunks, dim=0)
 
     def compute_similarity(self, q_reps, p_reps):
         if len(p_reps.size()) == 2:
@@ -333,19 +348,24 @@ class GritLMTrainModel(GritLM):
             batch_size = attention_mask.size(0)
             # Create a mask tensor for vectorized operation
             if batch_size > 0:
-                max_instr_len = max(instruction_lens)
-                if max_instr_len > 0:
-                    # Use broadcasting for faster masking
-                    seq_indices = torch.arange(attention_mask.size(1), device=attention_mask.device)
-                    # Properly create tensor from list (not from another tensor)
-                    if isinstance(instruction_lens, torch.Tensor):
-                        instr_lens_tensor = instruction_lens.to(attention_mask.device).unsqueeze(1)
-                    else:
-                        instr_lens_tensor = torch.as_tensor(instruction_lens, dtype=torch.long, device=attention_mask.device).unsqueeze(1)
-                    mask = seq_indices < instr_lens_tensor
-                    attention_mask[mask] = 0
+                # Always apply the vectorized mask. We intentionally avoid the previous
+                # `max(instruction_lens) > 0` guard because reducing a CUDA tensor to a
+                # Python int forces a GPU->CPU sync every encode (~20x/step), stalling the
+                # CPU so it cannot queue the next FSDP forward. The guard is unnecessary:
+                # for any entry whose instruction length is 0, (seq_indices < 0) is all-False,
+                # so the masked assignment is a no-op for it and the result is identical.
+                seq_indices = torch.arange(attention_mask.size(1), device=attention_mask.device)
+                # Properly create tensor from list (not from another tensor)
+                if isinstance(instruction_lens, torch.Tensor):
+                    instr_lens_tensor = instruction_lens.to(attention_mask.device).unsqueeze(1)
+                else:
+                    instr_lens_tensor = torch.as_tensor(instruction_lens, dtype=torch.long, device=attention_mask.device).unsqueeze(1)
+                attention_mask[seq_indices < instr_lens_tensor] = 0
 
-                    # Verify not all zeros - If this happens it is a bug
+                # Verify not all zeros - If this happens it is a bug. Gated behind an env flag
+                # because `.all()` is another per-encode GPU->CPU sync; the check does not affect
+                # training outputs, so it is opt-in for debugging only.
+                if os.getenv("GRITLM_DEBUG_MASK", "0") == "1":
                     assert (attention_mask.sum(dim=1) > 0).all(), "Some samples have all-zero attention masks"
 
         reps = self.pooling(out, attention_mask)

@@ -202,7 +202,7 @@ class GritLM(torch.nn.Module):
         elif self.pooling_method in ["mean", "weightedmean"]:
             if self.pooling_method == "weightedmean":
                 attention_mask *= attention_mask.cumsum(dim=1)  # [0,1,1,1,0,0] -> [0,1,2,3,0,0]
-            s = torch.sum(hidden_state * attention_mask.unsqueeze(-1).float(), dim=1)
+            s = torch.einsum("bnd,bn->bd", hidden_state.float(), attention_mask.float())
             d = attention_mask.sum(dim=1, keepdim=True).float()
             embedding = s / d
         else:

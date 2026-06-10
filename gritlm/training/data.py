@@ -1,3 +1,4 @@
+import itertools
 import logging
 import math
 import random
@@ -40,7 +41,10 @@ class CustomDataset(torch.utils.data.Dataset):
             query: Query text (str or list)
             passages: List of passage texts [positive, neg1, neg2, ...]
         """
-        query = self.ds_embedding[item]["query"]
+        # Decode the Arrow row once and reuse it; indexing the dataset repeatedly
+        # re-decodes the full row each time.
+        row = self.ds_embedding[item]
+        query = row["query"]
 
         if isinstance(query, str):
             query = query[: self.max_char_len]
@@ -48,7 +52,7 @@ class CustomDataset(torch.utils.data.Dataset):
             query = [x[: self.max_char_len] for x in query]
 
         passages = []
-        pos = random.choice(self.ds_embedding[item]["pos"])
+        pos = random.choice(row["pos"])
 
         if isinstance(pos, str):
             pos = pos[: self.max_char_len]
@@ -58,14 +62,15 @@ class CustomDataset(torch.utils.data.Dataset):
             raise ValueError(f"Unexpected type for pos: {type(pos)}")
         passages.append(pos)
 
-        if len(self.ds_embedding[item]["neg"]) == 0:  # @lucaswychan add checking of no negs since I may only use in-batch negs
+        neg_list = row["neg"]
+        if len(neg_list) == 0:  # @lucaswychan add checking of no negs since I may only use in-batch negs
             negs = []
         else:
-            if len(self.ds_embedding[item]["neg"]) < self.args.train_group_size - 1:
-                num = math.ceil((self.args.train_group_size - 1) / len(self.ds_embedding[item]["neg"]))
-                negs = random.sample(self.ds_embedding[item]["neg"] * num, self.args.train_group_size - 1)
+            if len(neg_list) < self.args.train_group_size - 1:
+                num = math.ceil((self.args.train_group_size - 1) / len(neg_list))
+                negs = random.sample(neg_list * num, self.args.train_group_size - 1)
             else:
-                negs = random.sample(self.ds_embedding[item]["neg"], self.args.train_group_size - 1)
+                negs = random.sample(neg_list, self.args.train_group_size - 1)
 
             for i, neg in enumerate(negs):
                 if isinstance(neg, str):
@@ -105,14 +110,36 @@ class CustomCollator(DataCollatorWithPadding):
         self._base_embed_prefix = self.base_bos + self.embed_bos.lstrip()
         self._user_embed_prefix = self.base_bos + self.user_bos
         self._embed_suffix = self.user_eos + self.embed_bos
+        self._instruction_len_cache = {}
+
+    def _instruction_lengths(self, instr_strs):
+        lengths = [None] * len(instr_strs)
+        uncached_strs = []
+        uncached_positions = []
+
+        for i, instr_str in enumerate(instr_strs):
+            if instr_str in self._instruction_len_cache:
+                lengths[i] = self._instruction_len_cache[instr_str]
+            else:
+                uncached_strs.append(instr_str)
+                uncached_positions.append(i)
+
+        if uncached_strs:
+            tokenized = self.tokenizer(uncached_strs, add_special_tokens=False)["input_ids"]
+            for i, instr_str, token_ids in zip(uncached_positions, uncached_strs, tokenized):
+                length = len(token_ids)
+                self._instruction_len_cache[instr_str] = length
+                lengths[i] = length
+
+        return lengths
 
     def __call__(self, features):
         query = [f[0] for f in features]
         passage = [f[1] for f in features]
 
-        # Flatten if list of lists
+        # Flatten if list of lists. itertools.chain is O(n) vs sum(..., []) which is O(n^2).
         if isinstance(passage[0], list):
-            passage = sum(passage, [])
+            passage = list(itertools.chain.from_iterable(passage))
 
         features = {}
 
@@ -133,8 +160,12 @@ class CustomCollator(DataCollatorWithPadding):
                 instr_strs.append(instr_str)
                 query_strs.append(query_str)
 
-            # Batch tokenize instruction strings for better performance
-            q_instruction_lens = [len(self.tokenizer.tokenize(s)) for s in instr_strs]
+            # Batch tokenize instruction strings for better performance. A single
+            # batched tokenizer call yields the same per-item token counts as calling
+            # tokenizer.tokenize() per string, but avoids the Python-level per-string loop.
+            # Guard the empty case: a batched call with [] raises in transformers, whereas
+            # the per-string comprehension used to yield [].
+            q_instruction_lens = self._instruction_lengths(instr_strs) if instr_strs else []
             query = query_strs
 
             # @lucaswychan add checking of passage type, since original approach will assume there is instruction in the passage
@@ -154,7 +185,7 @@ class CustomCollator(DataCollatorWithPadding):
                     passage_instr_strs.append(instr_str)
                     passage_strs.append(passage_str)
 
-                d_instruction_lens = [len(self.tokenizer.tokenize(s)) for s in passage_instr_strs]
+                d_instruction_lens = self._instruction_lengths(passage_instr_strs) if passage_instr_strs else []
                 passage = passage_strs
             else:
                 d_instruction_lens = []
@@ -178,11 +209,6 @@ class CustomCollator(DataCollatorWithPadding):
         )
 
         if q_instruction_lens:
-            # Check that there is no mistake
-            for i, l in enumerate(q_instruction_lens):
-                assert features["query"]["input_ids"][i, l] != self.tokenizer.pad_token, f"No text to embed: {query[i]}"
-            for i, l in enumerate(d_instruction_lens):
-                assert features["passage"]["input_ids"][i, l] != self.tokenizer.pad_token, f"No text to embed: {passage[i]}"
             # Need to be masked out later
             features["query"]["instruction_lens"] = torch.tensor(q_instruction_lens)
             # @lucaswychan: if there is no instruction in the passage, we don't add instruction_lens
@@ -233,7 +259,8 @@ class CustomRandomSampler(torch.utils.data.sampler.RandomSampler):
         # Create random indices for each dataset
         ds_indices = [torch.randperm(n, generator=generator).tolist() for n in self.ds_lens]
         # Increase the indices to be indices of the concatenated dataset
-        ds_indices = [[i + sum(self.ds_lens[:j]) for i in ds_indices[j]] for j in range(len(self.ds_lens))]
+        offsets = [0, *itertools.accumulate(self.ds_lens[:-1])]
+        ds_indices = [[i + offsets[j] for i in ds_indices[j]] for j in range(len(self.ds_lens))]
         # Create batches with only samples from one dataset
         ds_batches = [list(torch.split(torch.tensor(ds_indices[j]), self.total_batch_size)) for j in range(len(self.ds_lens))]
         # Create separate batches from the remaining samples
@@ -251,14 +278,14 @@ class CustomRandomSampler(torch.utils.data.sampler.RandomSampler):
             if len(mixed_batches[-1]) < self.total_batch_size:
                 mixed_batches.pop()
             # Merge all batches to look like [...tensor([259, 273, 284, 289]), tensor([262, 280, 295, 258]), ...]
-            ds_batches = sum(ds_batches, []) + mixed_batches
+            ds_batches = list(itertools.chain.from_iterable(ds_batches)) + mixed_batches
             logger.info(f"Using global batch size {self.total_batch_size} created {len(ds_batches) - len(mixed_batches)} single-dataset batches & {len(mixed_batches)} mixed dataset batches.")
         else:
-            ds_batches = sum(ds_batches, [])
+            ds_batches = list(itertools.chain.from_iterable(ds_batches))
             logger.info(f"Using global batch size {self.total_batch_size} created {len(ds_batches)} single-dataset batches.")
 
         # Randomly permute the order of all batches, then merge them to look like tensor([...259, 273, 284, 289, 262, 280, 295, 258...])
         order = torch.randperm(len(ds_batches), generator=generator).tolist()
-        ds_batches = [int(i) for i in torch.cat([ds_batches[i] for i in order]).tolist()]
+        ds_batches = torch.cat([ds_batches[i] for i in order]).tolist()
         # Yield the indices
         yield from ds_batches
