@@ -19,8 +19,23 @@
 source .venv/bin/activate
 cd gritlm
 
-export CUDA_VISIBLE_DEVICES=0,5,6,7
-export GPUS_PER_NODE=4
+# GPUs 0,1,2,4,5 are occupied by other users' jobs (vLLM servers etc.). Scheduling a rank
+# onto a busy GPU makes FSDP init hang forever: that rank cannot allocate the ~15 GiB for
+# the unsharded bf16 model, so it never joins the NCCL sync_module_states broadcast while
+# the remaining ranks spin at 100% utilization waiting for it.
+export CUDA_VISIBLE_DEVICES=3,6,7
+export GPUS_PER_NODE=3
+
+# Fail fast (instead of hanging in NCCL) if a selected GPU does not have enough free memory.
+MIN_FREE_MIB=30000
+for gpu in ${CUDA_VISIBLE_DEVICES//,/ }; do
+    free_mib=$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits -i "$gpu")
+    if [ "$free_mib" -lt "$MIN_FREE_MIB" ]; then
+        echo "ERROR: GPU $gpu has only ${free_mib} MiB free (< ${MIN_FREE_MIB} MiB needed)." >&2
+        echo "Another job is likely using it. Update CUDA_VISIBLE_DEVICES to free GPUs." >&2
+        exit 1
+    fi
+done
 
 export TORCH_CUDA_ARCH_LIST="8.9"
 export HF_HOME=/data/wychanbu/hugginface
@@ -36,7 +51,9 @@ export HF_HOME=/data/wychanbu/hugginface
 export NCCL_P2P_DISABLE=1
 
 # Memory and performance optimizations
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+# garbage_collection_threshold reclaims cached-but-unused blocks before fragmentation forces an OOM
+# (the observed failure reported large reserved-but-unallocated memory).
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True,garbage_collection_threshold:0.8
 export TORCH_CUDNN_V8_API_ENABLED=1  # Use cuDNN v8 API
 
 # Disable torch.compile/dynamo (incompatible with FSDP + GradCache)
@@ -49,7 +66,6 @@ export NVIDIA_TF32_OVERRIDE=1
 # Note: Use --report_to none flag instead of WANDB_DISABLED env var (deprecated in wandb v5)
 
 LAUNCHER="accelerate launch \
-    --config_file ../scripts/configs/config_8gpusfsdp_qwen.yml \
     --config_file ../scripts/configs/config_8gpusfsdp_qwen.yml \
     --num_machines 1 \
     --num_processes $GPUS_PER_NODE \
@@ -64,15 +80,15 @@ TRAIN_DATA=/data/wychanbu/re_data/hard-neg # replace with the directory of your 
 
 export CMD=" \
     -m training.run \
-    --output_dir /data/wychanbu/re_models/emb_model_with_sigreg \
-    --model_name_or_path Qwen/Qwen2.5-0.5B \
+    --output_dir /data/wychanbu/re_models/qwen3-8b_0p05_sigreg_64bsz \
+    --model_name_or_path Qwen/Qwen3-8B \
     --train_data $TRAIN_DATA \
     --learning_rate 2e-5 \
     --weight_decay 0.05 \
     --lr_scheduler_type cosine \
     --warmup_ratio 0.03 \
     --num_train_epochs 1 \
-    --per_device_train_batch_size 512 \
+    --per_device_train_batch_size 8 \
     --gradient_accumulation_steps 2 \
     --dataloader_drop_last \
     --normalized \
@@ -86,15 +102,15 @@ export CMD=" \
     --pooling_method mean \
     --attn bb \
     --attn_implementation flash_attention_2 \
-    --save_steps 200 \
+    --save_steps 6400 \
     --dataloader_num_workers 4 \
     --dataloader_pin_memory \
     --report_to none \
-    --gradient_checkpointing \
-    --sigreg_weight 0.5 \
+    --sigreg_weight 0.05 \
     "
+    # --gradient_checkpointing \
 # Note: torch.compile is automatically disabled with FSDP due to compatibility issues
 # For single-GPU training, you can add: --torch_compile --torch_compile_mode reduce-overhead
-# Optional: Add --use_fused_adamw for 5-10% optimizer speedup (don't use with --use_muon)
+# See scripts/training/performance_notes.md for behavior-preserving speed/memory knobs.
 
 clear; $LAUNCHER $CMD
