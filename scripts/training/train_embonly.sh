@@ -23,8 +23,8 @@ cd gritlm
 # onto a busy GPU makes FSDP init hang forever: that rank cannot allocate the ~15 GiB for
 # the unsharded bf16 model, so it never joins the NCCL sync_module_states broadcast while
 # the remaining ranks spin at 100% utilization waiting for it.
-export CUDA_VISIBLE_DEVICES=3,6,7
-export GPUS_PER_NODE=3
+export CUDA_VISIBLE_DEVICES=1,3,6,7
+export GPUS_PER_NODE=4
 
 # Fail fast (instead of hanging in NCCL) if a selected GPU does not have enough free memory.
 MIN_FREE_MIB=30000
@@ -80,8 +80,8 @@ TRAIN_DATA=/data/wychanbu/re_data/hard-neg # replace with the directory of your 
 
 export CMD=" \
     -m training.run \
-    --output_dir /data/wychanbu/re_models/qwen3-8b_0p05_sigreg_64bsz \
-    --model_name_or_path Qwen/Qwen3-8B \
+    --output_dir /data/wychanbu/re_models/qwen3-4b_0p05_sigreg_64bsz \
+    --model_name_or_path Qwen/Qwen3-4B \
     --train_data $TRAIN_DATA \
     --learning_rate 2e-5 \
     --weight_decay 0.05 \

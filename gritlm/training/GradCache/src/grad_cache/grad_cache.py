@@ -186,7 +186,7 @@ class GradCache:
         rnd_states = []
         model_reps = []
 
-        with torch.inference_mode():
+        with torch.no_grad():
             for x in model_inputs:
                 rnd_states.append(nullcontext() if self.skip_rng_state else RandContext(*self.get_input_tensors(x)))
                 y = self.model_call(model, x)
