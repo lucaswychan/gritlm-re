@@ -102,12 +102,13 @@ export CMD=" \
     --pooling_method mean \
     --attn bb \
     --attn_implementation flash_attention_2 \
-    --save_steps 6400 \
+    --save_steps 0.25 \
     --dataloader_num_workers 4 \
     --dataloader_pin_memory \
     --report_to none \
     --sigreg_weight 0.05 \
     "
+    # --save_steps accepts an absolute step count or a fraction in (0,1), e.g. 0.25 saves at each quarter
     # --gradient_checkpointing \
 # Note: torch.compile is automatically disabled with FSDP due to compatibility issues
 # For single-GPU training, you can add: --torch_compile --torch_compile_mode reduce-overhead
