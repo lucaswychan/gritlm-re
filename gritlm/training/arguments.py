@@ -1,8 +1,23 @@
+import math
 import os
 from dataclasses import dataclass, field
 from typing import Optional
 
 from transformers import TrainingArguments
+from transformers.training_args import SaveStrategy
+
+
+def resolve_interval_steps(steps: float, max_steps: int) -> int:
+    """Convert a step interval to an absolute step count.
+
+    Values in (0, 1) are treated as a fraction of ``max_steps`` (e.g. 0.25 -> checkpoint
+    every quarter of training). Integer values are returned unchanged.
+    """
+    if steps < 1:
+        if steps <= 0:
+            raise ValueError(f"Step interval must be positive, got {steps}")
+        return max(1, math.ceil(max_steps * steps))
+    return int(steps)
 
 
 @dataclass
@@ -93,3 +108,8 @@ class CustomTrainingArguments(TrainingArguments):
     torch_compile: bool = field(default=False, metadata={"help": "Use torch.compile for 20-50% speedup"})
     torch_compile_mode: str = field(default="reduce-overhead", metadata={"help": "Torch compile mode: default, reduce-overhead, max-autotune"})
     torch_compile_backend: str = field(default="inductor", metadata={"help": "Torch compile backend"})
+
+    def __post_init__(self):
+        super().__post_init__()
+        if self.save_strategy == SaveStrategy.STEPS and self.save_steps <= 0:
+            raise ValueError(f"--save_steps must be positive, got {self.save_steps}")

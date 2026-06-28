@@ -8,7 +8,7 @@ from pathlib import Path
 
 import torch
 import torch.distributed as dist
-from transformers import AutoConfig, AutoTokenizer, HfArgumentParser, Trainer, set_seed
+from transformers import AutoConfig, AutoTokenizer, HfArgumentParser, Trainer, TrainerCallback, set_seed
 from transformers.training_args import OptimizerNames
 from transformers.utils import is_sagemaker_mp_enabled
 
@@ -34,6 +34,26 @@ EMBED_BOS: str = ""
 EMBED_EOS: str = ""
 
 logger = logging.getLogger(__name__)
+
+
+class LogResolvedIntervalStepsCallback(TrainerCallback):
+    """Log when logging/save/eval step intervals are given as fractions of total training steps."""
+
+    def on_train_begin(self, args, state, control, **kwargs):
+        if not state.is_world_process_zero:
+            return control
+        for kind in ("logging", "save", "eval"):
+            interval = getattr(args, f"{kind}_steps", None)
+            resolved = getattr(state, f"{kind}_steps", None)
+            if interval is not None and interval < 1 and resolved is not None:
+                logger.info(
+                    "%s_steps=%s is a fraction of %s total steps -> checkpoint/log/eval every %s steps",
+                    kind,
+                    interval,
+                    state.max_steps,
+                    resolved,
+                )
+        return control
 
 
 def args_to_dtype(args):
@@ -446,6 +466,8 @@ def main():
         # Use standard Trainer
         logger.info("Creating standard Trainer...")
         trainer = Trainer(**trainer_kwargs)
+
+    trainer.add_callback(LogResolvedIntervalStepsCallback())
 
     # # Ensure FSDP optimizer state loading does not assume tensors for scalar states (e.g., step ints)
     # # Disable rank0-only path which calls `.cpu()` on every param state value
