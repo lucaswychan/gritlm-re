@@ -23,7 +23,7 @@ cd gritlm
 # onto a busy GPU makes FSDP init hang forever: that rank cannot allocate the ~15 GiB for
 # the unsharded bf16 model, so it never joins the NCCL sync_module_states broadcast while
 # the remaining ranks spin at 100% utilization waiting for it.
-export CUDA_VISIBLE_DEVICES=1,3,6,7
+export CUDA_VISIBLE_DEVICES=0,3,5,6
 export GPUS_PER_NODE=4
 
 # Fail fast (instead of hanging in NCCL) if a selected GPU does not have enough free memory.
@@ -69,26 +69,25 @@ LAUNCHER="accelerate launch \
     --config_file ../scripts/configs/config_8gpusfsdp_qwen.yml \
     --num_machines 1 \
     --num_processes $GPUS_PER_NODE \
-    --main_process_port 8001 \
+    --main_process_port 8003 \
     --machine_rank 0 \
     --role localhost: \
     --tee 1 \
     "
 
 TRAIN_DATA=/data/wychanbu/re_data/hard-neg # replace with the directory of your training data
-TRAIN_DATA=/data/wychanbu/re_data/hard-neg # replace with the directory of your training data
 
 export CMD=" \
     -m training.run \
-    --output_dir /data/wychanbu/re_models/qwen3-4b_0p05_sigreg_64bsz \
-    --model_name_or_path Qwen/Qwen3-4B \
+    --output_dir /data/wychanbu/re_models/qwen2-5-1p5b_simplerl_zoo_0p05_sigreg_512bsz_fix_global_batch_size \
+    --model_name_or_path hkust-nlp/Qwen-2.5-1.5B-SimpleRL-Zoo \
     --train_data $TRAIN_DATA \
     --learning_rate 2e-5 \
     --weight_decay 0.05 \
     --lr_scheduler_type cosine \
     --warmup_ratio 0.03 \
     --num_train_epochs 1 \
-    --per_device_train_batch_size 8 \
+    --per_device_train_batch_size 64 \
     --gradient_accumulation_steps 2 \
     --dataloader_drop_last \
     --normalized \
@@ -107,6 +106,7 @@ export CMD=" \
     --dataloader_pin_memory \
     --report_to none \
     --sigreg_weight 0.05 \
+    --gradient_checkpointing \
     "
     # --save_steps accepts an absolute step count or a fraction in (0,1), e.g. 0.25 saves at each quarter
     # --gradient_checkpointing \

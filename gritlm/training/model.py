@@ -26,7 +26,7 @@ class SIGReg(torch.nn.Module):
         self.register_buffer("phi", window)
         self.register_buffer("weights", weights * window)
 
-    def forward(self, proj, num_slices: int = 256, n_global: Optional[int] = None):
+    def forward(self, proj, num_slices: int = 256):
         # Run SIGReg in fp32 to avoid bf16/fp32 matmul mismatches and keep
         # trigonometric computations numerically stable under mixed precision.
         with torch.autocast(device_type=proj.device.type, enabled=False):
@@ -36,14 +36,12 @@ class SIGReg(torch.nn.Module):
             weights = self.weights.to(device=proj.device, dtype=proj.dtype)
 
             A = torch.randn(proj.size(-1), num_slices, device=proj.device, dtype=proj.dtype)
+            if dist.is_initialized() and dist.get_world_size() > 1:
+                dist.broadcast(A, src=0)
             A = A.div_(A.norm(p=2, dim=0))
             x_t = (proj @ A).unsqueeze(-1) * t
             err = (x_t.cos().mean(-3) - phi).square() + x_t.sin().mean(-3).square()
-            # Use the global batch size for consistent scaling across device counts.
-            # In distributed training n_global = N_local * world_size so that
-            # sigreg_weight does not need to be re-tuned when changing GPU count.
-            n = n_global if n_global is not None else proj.size(-2)
-            statistic = (err @ weights) * n
+            statistic = (err @ weights) * proj.size(-2)
             return statistic.mean()
 
 
@@ -293,6 +291,29 @@ class GritLMTrainModel(GritLM):
             return reps * (reps.shape[-1] ** 0.5)
         return reps
 
+    def _gather_for_sigreg(self, reps: torch.Tensor):
+        """Gather global SIGReg samples while keeping autograd for this rank."""
+        if not dist.is_initialized():
+            return reps, 1
+
+        world_size = dist.get_world_size()
+        if world_size == 1:
+            return reps, 1
+
+        reps = reps.contiguous()
+        gathered = [torch.empty_like(reps) for _ in range(world_size)]
+        with torch.no_grad():
+            dist.all_gather(gathered, reps)
+        gathered[dist.get_rank()] = reps
+        return torch.cat(gathered, dim=0), world_size
+
+    @staticmethod
+    def _scale_grad(loss: torch.Tensor, scale: int):
+        """Preserve the scalar value while compensating for distributed grad averaging."""
+        if scale == 1:
+            return loss
+        return loss.detach() + (loss - loss.detach()) * scale
+
     @property
     def combined_loss_fn(self):
         """Combined contrastive + SIGReg loss for the GradCache path.
@@ -312,15 +333,16 @@ class GritLMTrainModel(GritLM):
         sigreg = self.sigreg
         sigreg_weight = self.sigreg_weight
         scale_for_sigreg = self._scale_for_sigreg
+        gather_for_sigreg = self._gather_for_sigreg
+        scale_grad = self._scale_grad
 
         def _combined(q_reps, p_reps):
             contrastive_loss = emb_loss_fn(q_reps, p_reps)
             all_reps = torch.cat([q_reps, p_reps], dim=0)
-            world_size = dist.get_world_size() if dist.is_initialized() else 1
-            n_global = all_reps.size(0) * world_size
-            sigreg_loss = sigreg(scale_for_sigreg(all_reps), n_global=n_global).to(contrastive_loss.dtype)
-            return (1 - sigreg_weight) * contrastive_loss + sigreg_weight * sigreg_loss # changed from (1 - sigreg_weight) * contrastive_loss + sigreg_weight * sigreg_loss to (1 - sigreg_weight) * contrastive_loss + sigreg_weight * sigreg_loss
-            # return contrastive_loss + sigreg_weight * sigreg_loss
+            all_reps, sigreg_grad_scale = gather_for_sigreg(all_reps)
+            sigreg_loss = sigreg(scale_for_sigreg(all_reps)).to(contrastive_loss.dtype)
+            sigreg_loss = scale_grad(sigreg_loss, sigreg_grad_scale)
+            return contrastive_loss + sigreg_weight * sigreg_loss
 
         return _combined
 
@@ -408,17 +430,15 @@ class GritLMTrainModel(GritLM):
         loss_sigreg = None
         if self.sigreg is not None and q_reps is not None and p_reps is not None:
             all_reps = torch.cat([q_reps, p_reps], dim=0)  # (N + N*M, D)
-            # Pass the global batch size so the test statistic scales correctly
-            # with world size. Memory stays proportional to N_local — no gather.
-            # Note: SIGReg is skipped in the GradCache path because GradCache
+            # SIGReg is skipped in the GradCache path because GradCache
             # calls forward() with passage=None per chunk; p_reps stays None.
-            world_size = dist.get_world_size() if dist.is_initialized() else 1
-            n_global = all_reps.size(0) * world_size
-            loss_sigreg = self.sigreg(self._scale_for_sigreg(all_reps), n_global=n_global).to(loss_emb.dtype)
+            all_reps, sigreg_grad_scale = self._gather_for_sigreg(all_reps)
+            loss_sigreg = self.sigreg(self._scale_for_sigreg(all_reps)).to(loss_emb.dtype)
+            loss_sigreg = self._scale_grad(loss_sigreg, sigreg_grad_scale)
 
         loss = loss_emb
         if loss_sigreg is not None:
-            loss = (1 - self.sigreg_weight) * loss_emb + self.sigreg_weight * loss_sigreg
+            loss = loss_emb + self.sigreg_weight * loss_sigreg
 
         # Also return q_reps in case of GradCache
         return GritLMTrainOutput(
